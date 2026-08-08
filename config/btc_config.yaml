@@ -1,0 +1,40 @@
+capital:
+  total: 350
+  pools:
+    trend_following: 150
+    mean_reversion: 150
+    momentum_burst: 50
+
+risk:
+  risk_per_trade_pct: 0.01
+  max_concurrent_positions: 3
+  daily_loss_limit_usd: 10
+
+regime:
+  adx_threshold: 25
+  persistence_candles: 2
+
+sentinel:
+  max_spread_pct: 0.05
+  max_candle_range_atr_mult: 3.0
+
+trend_following:
+  breakout_period: 10
+  atr_stop_mult: 1.0
+  atr_tp_mult: 2.0
+
+mean_reversion:
+  rsi_period: 7
+  rsi_oversold: 30
+  rsi_overbought: 70
+  atr_stop_mult: 1.5
+
+momentum_burst:
+  adx_threshold: 30
+  consolidation_range_mult: 0.5
+  atr_stop_mult: 0.5
+  atr_tp_mult: 1.5
+
+fees:
+  taker_pct: 0.0026
+  slippage_pct: 0.001
