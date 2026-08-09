@@ -1,52 +1,72 @@
+import logging
 import pandas as pd
-from engine.indicators import atr, adx
-from strategies.base import Signal
+from .base import Signal
+from engine.indicators import adx, atr
 
+logger = logging.getLogger(__name__)
 
-def generate_signals(df_5m: pd.DataFrame, cfg: dict) -> pd.DataFrame:
-    """
-    Always-active strategy: ADX > threshold AND a tight 3-candle consolidation
-    (range < consolidation_range_mult * ATR) that then breaks in either direction.
-    """
-    adx_threshold = cfg["adx_threshold"]
-    range_mult = cfg["consolidation_range_mult"]
-    stop_mult = cfg["atr_stop_mult"]
-    tp_mult = cfg["atr_tp_mult"]
+class MomentumBurst:
+    def __init__(self, config):
+        self.config = config['strategies']['momentum_burst']
+        self.pool = config['strategy_pools']['momentum']
 
-    adx_series = adx(df_5m, period=14)
-    atr_series = atr(df_5m, period=14)
+    def is_active(self, regime):
+        return True  # Always active
 
-    # 3-candle consolidation range (prior 3 candles, excluding current)
-    high3 = df_5m["high"].rolling(3).max().shift(1)
-    low3 = df_5m["low"].rolling(3).min().shift(1)
-    consolidation_range = high3 - low3
-    is_tight = consolidation_range < (range_mult * atr_series)
-
-    strong_trend = adx_series > adx_threshold
-
-    breakout_up = (df_5m["close"] > high3) & is_tight & strong_trend
-    breakout_down = (df_5m["close"] < low3) & is_tight & strong_trend
-
-    out = pd.DataFrame(index=df_5m.index)
-    out["signal"] = (breakout_up | breakout_down).fillna(False)
-    out["direction"] = "none"
-    out.loc[breakout_up.fillna(False), "direction"] = "long"
-    out.loc[breakout_down.fillna(False), "direction"] = "short"
-
-    out["stop_price"] = None
-    out.loc[breakout_up.fillna(False), "stop_price"] = (
-        df_5m["close"] - stop_mult * atr_series
-    )[breakout_up.fillna(False)]
-    out.loc[breakout_down.fillna(False), "stop_price"] = (
-        df_5m["close"] + stop_mult * atr_series
-    )[breakout_down.fillna(False)]
-
-    out["take_profit_price"] = None
-    out.loc[breakout_up.fillna(False), "take_profit_price"] = (
-        df_5m["close"] + tp_mult * atr_series
-    )[breakout_up.fillna(False)]
-    out.loc[breakout_down.fillna(False), "take_profit_price"] = (
-        df_5m["close"] - tp_mult * atr_series
-    )[breakout_down.fillna(False)]
-
-    return out
+    def evaluate(self, candles_1m, candles_5m, ticker):
+        """ADX>threshold & tight consolidation breakout."""
+        if len(candles_5m) < 25:
+            return None
+        
+        try:
+            df = pd.DataFrame(candles_5m, columns=['timestamp','open','high','low','close','volume'])
+            adx_val = adx(df, 14)
+            
+            if adx_val < self.config['adx_threshold']:
+                return None
+            
+            # Check last 3 candles for consolidation
+            last_3 = df.tail(3)
+            high_max = last_3['high'].max()
+            low_min = last_3['low'].min()
+            range_3 = high_max - low_min
+            
+            atr_val = atr(candles_5m, 14)
+            if atr_val == 0:
+                return None
+            
+            # Consolidation should be tight
+            if range_3 > self.config['consolidation_range'] * atr_val:
+                return None
+            
+            last_close = df['close'].iloc[-1]
+            
+            # Breakout above 3-candle high
+            if last_close > high_max:
+                stop = last_close - self.config['atr_stop_mult'] * atr_val
+                tp = last_close + self.config['atr_tp_mult'] * atr_val
+                
+                return Signal(
+                    strategy='momentum',
+                    action='BUY',
+                    entry_price=last_close,
+                    stop_price=stop,
+                    take_profit=tp
+                )
+            
+            # Breakout below 3-candle low
+            elif last_close < low_min:
+                stop = last_close + self.config['atr_stop_mult'] * atr_val
+                tp = last_close - self.config['atr_tp_mult'] * atr_val
+                
+                return Signal(
+                    strategy='momentum',
+                    action='SELL',
+                    entry_price=last_close,
+                    stop_price=stop,
+                    take_profit=tp
+                )
+        except Exception as e:
+            logger.debug(f"Momentum eval error: {e}")
+        
+        return None
