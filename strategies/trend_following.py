@@ -1,33 +1,47 @@
+import logging
 import pandas as pd
-from engine.indicators import atr, rolling_high
-from strategies.base import Signal
+from .base import Signal
+from engine.indicators import atr
 
+logger = logging.getLogger(__name__)
 
-def generate_signals(df_5m: pd.DataFrame, regime: pd.Series, cfg: dict) -> pd.DataFrame:
-    """
-    Long-only breakout: close > highest high of last N candles (N = breakout_period),
-    active only while regime == 'trending'.
+class TrendFollowing:
+    def __init__(self, config):
+        self.config = config['strategies']['trend_following']
+        self.pool = config['strategy_pools']['trend']
 
-    Returns a DataFrame indexed same as df_5m with columns:
-    signal (bool), direction, stop_price, take_profit_price
-    """
-    period = cfg["breakout_period"]
-    stop_mult = cfg["atr_stop_mult"]
-    tp_mult = cfg["atr_tp_mult"]
+    def is_active(self, regime):
+        return regime == 'trending'
 
-    hh = rolling_high(df_5m, period)
-    atr_series = atr(df_5m, period=14)
-
-    breakout = df_5m["close"] > hh
-    trending = regime == "trending"
-    triggered = breakout & trending
-
-    stop_price = df_5m["close"] - stop_mult * atr_series
-    tp_price = df_5m["close"] + tp_mult * atr_series
-
-    out = pd.DataFrame(index=df_5m.index)
-    out["signal"] = triggered.fillna(False)
-    out["direction"] = "long"
-    out["stop_price"] = stop_price
-    out["take_profit_price"] = tp_price
-    return out
+    def evaluate(self, candles_1m, candles_5m, ticker):
+        """5-min breakout: close > highest high of last N candles."""
+        if len(candles_5m) < self.config['breakout_period'] + 2:
+            return None
+        
+        try:
+            df = pd.DataFrame(candles_5m, columns=['timestamp','open','high','low','close','volume'])
+            last_close = df['close'].iloc[-1]
+            
+            # Get highest high from last N candles (excluding current)
+            period = self.config['breakout_period']
+            highest_high = df['high'].iloc[-period-1:-1].max()
+            
+            if last_close > highest_high:
+                atr_val = atr(candles_5m, 14)
+                if atr_val == 0:
+                    return None
+                
+                stop = last_close - self.config['atr_stop_mult'] * atr_val
+                tp = last_close + self.config['atr_tp_mult'] * atr_val
+                
+                return Signal(
+                    strategy='trend',
+                    action='BUY',
+                    entry_price=last_close,
+                    stop_price=stop,
+                    take_profit=tp
+                )
+        except Exception as e:
+            logger.debug(f"Trend eval error: {e}")
+        
+        return None
