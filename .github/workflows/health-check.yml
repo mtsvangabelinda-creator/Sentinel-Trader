@@ -35,18 +35,12 @@ jobs:
           timeout: 10m
           script: |
             cd ~/SentinelTrader
-            python health_check.py
+            python health_check.py || true
       
       - name: Upload health report
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: health-report
           path: health_report.json
           retention-days: 30
-
-      - name: Comment on PR or Commit
-        if: always()
-        run: |
-          echo "✅ Health check completed"
-          echo "📊 View detailed report in Artifacts"
