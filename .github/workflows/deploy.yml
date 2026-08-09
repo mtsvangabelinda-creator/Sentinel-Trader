@@ -12,8 +12,6 @@ jobs:
     
     steps:
       - uses: actions/checkout@v3
-        with:
-          submodules: recursive
       
       - name: Create .env file from secrets
         run: |
@@ -24,7 +22,6 @@ jobs:
           TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
           EOF
           chmod 600 .env
-          echo "✅ .env file created"
       
       - name: Deploy to Oracle Cloud VM
         uses: appleboy/ssh-action@master
@@ -39,47 +36,33 @@ jobs:
             set -e
             echo "🚀 Starting deployment..."
             
-            # Install Docker if not present
+            # Install Docker if needed
             if ! command -v docker &> /dev/null; then
-              echo "📦 Installing Docker and Docker Compose..."
+              echo "📦 Installing Docker..."
               sudo apt-get update
               sudo apt-get install -y docker.io docker-compose
               sudo usermod -aG docker ubuntu
               sudo systemctl restart docker
-              echo "✅ Docker installed successfully"
-            else
-              echo "✅ Docker already installed"
             fi
             
-            # Enable Docker BuildKit for faster builds and better caching
             export DOCKER_BUILDKIT=1
             
-            # Activate docker group for current session
             newgrp docker << 'DOCKER_COMMANDS'
             
-            # Navigate to project
             cd ~/SentinelTrader || (mkdir -p ~/SentinelTrader && cd ~/SentinelTrader && git clone https://github.com/${{ github.repository }}.git .)
             
-            # Pull latest code
             git pull origin main || true
             
-            # Initialize and update git submodules
-            echo "📥 Initializing git submodules..."
-            git submodule update --init --recursive || true
-            
-            # Create data directory if it doesn't exist
-            mkdir -p data
-            
-            # Create symlink to CSV from submodule
-            echo "🔗 Creating symlink to bitstamp data..."
-            if [ -f "data/bitstamp/data/csv/bitstamp_btcusd_1min_data.csv" ]; then
-              ln -sf ../bitstamp/data/csv/bitstamp_btcusd_1min_data.csv data/btcusd_bitstamp_1min_latest.csv
-              echo "✅ Symlink created successfully"
-            else
-              echo "⚠️  Bitstamp CSV not found, system will download data"
+            # Extract CSV if compressed
+            echo "📥 Checking for compressed CSV..."
+            if [ -f "data/btcusd_bitstamp_1min_latest.csv.zip" ]; then
+              echo "Extracting CSV..."
+              cd data
+              unzip -o btcusd_bitstamp_1min_latest.csv.zip
+              cd ..
+              echo "✅ CSV extracted"
             fi
             
-            # Create .env file
             cat > .env << 'ENVEOF'
             KRAKEN_API_KEY=${{ secrets.KRAKEN_API_KEY }}
             KRAKEN_SECRET=${{ secrets.KRAKEN_SECRET }}
@@ -87,28 +70,19 @@ jobs:
             TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
             ENVEOF
             chmod 600 .env
-            echo "✅ .env file created"
             
-            # Stop old containers
             docker-compose down || true
-            
-            # Remove dangling images to free space
             docker image prune -f -a --filter "until=24h" || true
             
-            # Build and start (with BuildKit enabled)
-            echo "🔨 Building and starting containers with BuildKit..."
+            echo "🔨 Building and starting..."
             export DOCKER_BUILDKIT=1
             docker-compose up -d --build
             
-            # Wait for startup
             sleep 15
             
-            # Check status
-            echo "📊 Container status:"
+            echo "📊 Status:"
             docker-compose ps
-            
-            echo "📋 Recent logs:"
-            docker-compose logs app | tail -100
+            docker-compose logs app | tail -50
             
             echo "✅ Deployment complete!"
             
