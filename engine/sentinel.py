@@ -1,27 +1,46 @@
-"""
-The Sentinel is a pure safety gate. It never generates signals and never
-closes positions -- it only blocks NEW entries when conditions look toxic
-(wide spread, or a candle range blown out relative to recent volatility).
+import logging
+from .indicators import atr
 
-In backtesting we don't have live bid/ask, so spread is estimated as a
-constant historical average unless real order-book data is supplied.
-"""
-import pandas as pd
-from engine.indicators import atr
+logger = logging.getLogger(__name__)
 
+class Sentinel:
+    """Safety gate: checks spread and volatility."""
+    def __init__(self, config):
+        self.max_spread_pct = config['sentinel']['max_spread_pct']
+        self.range_multiplier = config['sentinel']['range_multiplier']
 
-def sentinel_mask(df: pd.DataFrame, max_spread_pct: float = 0.05,
-                   max_range_atr_mult: float = 3.0,
-                   estimated_spread_pct: float = 0.02) -> pd.Series:
-    """
-    Returns a boolean Series: True = safe to enter, False = blocked.
-    df must have high/low/close columns.
-    """
-    atr_series = atr(df, period=14)
-    candle_range = df["high"] - df["low"]
+    def check(self, ticker, candles_5m):
+        """Return True if market conditions are safe for entry."""
+        if not ticker or 'bid' not in ticker or 'ask' not in ticker:
+            return False
 
-    range_ok = candle_range <= (max_range_atr_mult * atr_series)
-    spread_ok = estimated_spread_pct <= max_spread_pct  # constant in backtest
+        bid = ticker['bid']
+        ask = ticker['ask']
+        
+        if bid <= 0 or ask <= 0:
+            return False
 
-    safe = range_ok & spread_ok
-    return safe.fillna(False)
+        spread_pct = (ask - bid) / bid * 100
+        if spread_pct > self.max_spread_pct:
+            logger.debug(f"Sentinel: Spread too wide {spread_pct:.4f}%")
+            return False
+
+        if len(candles_5m) < 15:
+            return True
+
+        try:
+            atr_val = atr(candles_5m, period=14)
+            if atr_val == 0:
+                return True
+            
+            current_candle = candles_5m[-1]
+            candle_range = current_candle[2] - current_candle[3]
+            
+            if candle_range > self.range_multiplier * atr_val:
+                logger.debug(f"Sentinel: Candle range too wide {candle_range:.2f} vs {self.range_multiplier * atr_val:.2f}")
+                return False
+        except Exception as e:
+            logger.debug(f"Sentinel check error: {e}")
+            return True
+
+        return True
