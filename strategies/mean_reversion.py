@@ -1,50 +1,64 @@
+import logging
 import pandas as pd
-from engine.indicators import atr, rsi, bollinger_bands
-from strategies.base import Signal
+from .base import Signal
+from engine.indicators import rsi, bb, atr
 
+logger = logging.getLogger(__name__)
 
-def generate_signals(df_1m: pd.DataFrame, regime_5m: pd.Series, cfg: dict) -> pd.DataFrame:
-    """
-    df_1m: 1-minute OHLCV.
-    regime_5m: regime series computed on 5-min candles; forward-filled onto the
-    1-min index so each 1-min bar knows the current 5-min regime.
+class MeanReversion:
+    def __init__(self, config):
+        self.config = config['strategies']['mean_reversion']
+        self.pool = config['strategy_pools']['meanrev']
 
-    Long: RSI < oversold AND close near BB lower band.
-    Short: RSI > overbought AND close near BB upper band.
-    Active only while regime == 'ranging'.
-    """
-    rsi_period = cfg["rsi_period"]
-    oversold = cfg["rsi_oversold"]
-    overbought = cfg["rsi_overbought"]
-    stop_mult = cfg["atr_stop_mult"]
+    def is_active(self, regime):
+        return regime == 'ranging'
 
-    rsi_series = rsi(df_1m, period=rsi_period)
-    bb = bollinger_bands(df_1m, period=20, std_mult=2.0)
-    atr_series = atr(df_1m, period=14)
+    def evaluate(self, candles_1m, candles_5m, ticker):
+        """1-min RSI(7) oversold/overbought + BB proximity."""
+        if len(candles_1m) < 30:
+            return None
+        
+        try:
+            df = pd.DataFrame(candles_1m, columns=['timestamp','open','high','low','close','volume'])
+            rsi_val = rsi(df, self.config['rsi_period'])
+            bb_vals = bb(df, self.config['bb_period'], self.config['bb_std'])
+            
+            if bb_vals is None:
+                return None
+            
+            upper, middle, lower = bb_vals
+            last_close = df['close'].iloc[-1]
+            atr_val = atr(candles_1m, 14)
+            
+            if atr_val == 0:
+                return None
 
-    regime_aligned = regime_5m.reindex(df_1m.index, method="ffill")
-    ranging = regime_aligned == "ranging"
-
-    near_lower = df_1m["close"] <= bb["bb_lower"]
-    near_upper = df_1m["close"] >= bb["bb_upper"]
-
-    long_trigger = (rsi_series < oversold) & near_lower & ranging
-    short_trigger = (rsi_series > overbought) & near_upper & ranging
-
-    out = pd.DataFrame(index=df_1m.index)
-    out["signal"] = (long_trigger | short_trigger).fillna(False)
-    out["direction"] = "none"
-    out.loc[long_trigger.fillna(False), "direction"] = "long"
-    out.loc[short_trigger.fillna(False), "direction"] = "short"
-
-    out["stop_price"] = None
-    out.loc[long_trigger.fillna(False), "stop_price"] = (
-        df_1m["close"] - stop_mult * atr_series
-    )[long_trigger.fillna(False)]
-    out.loc[short_trigger.fillna(False), "stop_price"] = (
-        df_1m["close"] + stop_mult * atr_series
-    )[short_trigger.fillna(False)]
-
-    # Take profit: BB middle band (mean reversion target)
-    out["take_profit_price"] = bb["bb_mid"]
-    return out
+            # Long: RSI < oversold and close near lower band
+            if rsi_val < self.config['rsi_oversold'] and last_close <= lower * 1.02:
+                stop = last_close - self.config['atr_stop_mult'] * atr_val
+                tp = middle
+                
+                return Signal(
+                    strategy='meanrev',
+                    action='BUY',
+                    entry_price=last_close,
+                    stop_price=stop,
+                    take_profit=tp
+                )
+            
+            # Short: RSI > overbought and close near upper band
+            elif rsi_val > self.config['rsi_overbought'] and last_close >= upper * 0.98:
+                stop = last_close + self.config['atr_stop_mult'] * atr_val
+                tp = middle
+                
+                return Signal(
+                    strategy='meanrev',
+                    action='SELL',
+                    entry_price=last_close,
+                    stop_price=stop,
+                    take_profit=tp
+                )
+        except Exception as e:
+            logger.debug(f"MeanRev eval error: {e}")
+        
+        return None
