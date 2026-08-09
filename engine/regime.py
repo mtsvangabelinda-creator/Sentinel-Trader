@@ -1,38 +1,38 @@
-"""
-Classifies each 5-min candle as 'trending' or 'ranging' based on ADX(14),
-with a persistence filter so the regime doesn't flip on a single noisy candle.
-"""
+import numpy as np
 import pandas as pd
-from engine.indicators import adx
+import logging
+from .indicators import adx
 
+logger = logging.getLogger(__name__)
 
-def classify_regime(df_5m: pd.DataFrame, adx_threshold: int = 25,
-                     persistence: int = 2) -> pd.Series:
-    """
-    df_5m: 5-minute OHLCV DataFrame.
-    Returns a Series of 'trending' / 'ranging', same index as df_5m.
-    """
-    adx_series = adx(df_5m, period=14)
-    raw_regime = (adx_series > adx_threshold).map({True: "trending", False: "ranging"})
+class RegimeClassifier:
+    """ADX-based regime classifier with persistence filter."""
+    def __init__(self, config):
+        self.period = config['regime']['adx_period']
+        self.threshold = config['regime']['adx_threshold']
+        self.persistence = config['regime']['persistence']
+        self.history = []
+        self.current_regime = 'ranging'
+        self.adx_value = 0
 
-    # Persistence filter: only flip regime once it holds for `persistence` candles
-    last_confirmed = None
-    run_length = 0
-    run_value = None
+    def update(self, candles_5m):
+        """Update regime based on new 5m candles."""
+        if len(candles_5m) < self.period + 1:
+            return self.current_regime
 
-    result = []
-    for value in raw_regime:
-        if pd.isna(value):
-            result.append(None)
-            continue
-        if value == run_value:
-            run_length += 1
-        else:
-            run_value = value
-            run_length = 1
+        df = pd.DataFrame(candles_5m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        self.adx_value = adx(df, self.period)
 
-        if run_length >= persistence:
-            last_confirmed = value
-        result.append(last_confirmed)
+        new_regime = 'trending' if self.adx_value > self.threshold else 'ranging'
+        self.history.append(new_regime)
 
-    return pd.Series(result, index=df_5m.index, name="regime")
+        if len(self.history) >= self.persistence:
+            last_n = self.history[-self.persistence:]
+            if all(r == new_regime for r in last_n):
+                self.current_regime = new_regime
+
+        if len(self.history) > 100:
+            self.history = self.history[-100:]
+
+        logger.debug(f"Regime: {self.current_regime}, ADX: {self.adx_value:.2f}")
+        return self.current_regime
