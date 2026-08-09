@@ -4,15 +4,14 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch:  # Allows manual trigger
+  workflow_dispatch:
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
       
       - name: Create .env file from secrets
         run: |
@@ -36,15 +35,23 @@ jobs:
             set -e
             echo "🚀 Starting deployment..."
             
+            # Install Docker if not present
+            if ! command -v docker &> /dev/null; then
+              echo "📦 Installing Docker and Docker Compose..."
+              sudo apt-get update
+              sudo apt-get install -y docker.io docker-compose
+              sudo usermod -aG docker ubuntu
+              sudo systemctl restart docker
+              echo "✅ Docker installed successfully"
+            else
+              echo "✅ Docker already installed"
+            fi
+            
             # Navigate to project
-            cd ~/SentinelTrader || mkdir -p ~/SentinelTrader && cd ~/SentinelTrader
+            cd ~/SentinelTrader || (mkdir -p ~/SentinelTrader && cd ~/SentinelTrader && git clone https://github.com/${{ github.repository }}.git .)
             
             # Pull latest code
-            if [ -d .git ]; then
-              git pull origin main
-            else
-              git clone https://github.com/${{ github.repository }}.git .
-            fi
+            git pull origin main || true
             
             # Create .env file
             cat > .env << 'ENVEOF'
@@ -54,6 +61,7 @@ jobs:
             TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
             ENVEOF
             chmod 600 .env
+            echo "✅ .env file created"
             
             # Stop old containers
             docker-compose down || true
@@ -62,21 +70,17 @@ jobs:
             docker image prune -f || true
             
             # Build and start
+            echo "🔨 Building and starting containers..."
             docker-compose up -d --build
             
             # Wait for startup
             sleep 10
             
             # Check status
+            echo "📊 Container status:"
             docker-compose ps
+            
+            echo "📋 Recent logs:"
             docker-compose logs app | head -50
             
-            echo "✅ Deployment complete"
-      
-      - name: Notify on success
-        if: success()
-        run: echo "🟢 SentinelTrader deployed successfully"
-      
-      - name: Notify on failure
-        if: failure()
-        run: echo "🔴 Deployment failed - check logs"
+            echo "✅ Deployment complete!"
