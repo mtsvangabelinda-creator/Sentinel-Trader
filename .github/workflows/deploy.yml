@@ -12,6 +12,8 @@ jobs:
     
     steps:
       - uses: actions/checkout@v3
+        with:
+          submodules: recursive
       
       - name: Create .env file from secrets
         run: |
@@ -55,6 +57,22 @@ jobs:
             
             # Pull latest code
             git pull origin main || true
+            
+            # Initialize and update git submodules
+            echo "📥 Initializing git submodules..."
+            git submodule update --init --recursive || true
+            
+            # Create data directory if it doesn't exist
+            mkdir -p data
+            
+            # Create symlink to CSV from submodule
+            echo "🔗 Creating symlink to bitstamp data..."
+            if [ -f "data/bitstamp/data/csv/bitstamp_btcusd_1min_data.csv" ]; then
+              ln -sf ../bitstamp/data/csv/bitstamp_btcusd_1min_data.csv data/btcusd_bitstamp_1min_latest.csv
+              echo "✅ Symlink created successfully"
+            else
+              echo "⚠️  Bitstamp CSV not found, system will use downloaded data"
+            fi
             
             # Create .env file
             cat > .env << 'ENVEOF'
