@@ -1,0 +1,52 @@
+name: Health Check
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'  # Every 30 minutes
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -q -r requirements.txt
+      
+      - name: Run health check on Oracle VM
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.ORACLE_HOST }}
+          username: ubuntu
+          key: ${{ secrets.ORACLE_SSH_KEY }}
+          port: 22
+          timeout: 10m
+          script: |
+            cd ~/SentinelTrader
+            python health_check.py
+      
+      - name: Upload health report
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: health-report
+          path: health_report.json
+          retention-days: 30
+
+      - name: Comment on PR or Commit
+        if: always()
+        run: |
+          echo "✅ Health check completed"
+          echo "📊 View detailed report in Artifacts"
