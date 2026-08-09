@@ -1,73 +1,114 @@
-"""
-Indicators computed directly with pandas/numpy rather than pandas-ta, so the
-system has one less external dependency that can break on a version bump.
-All functions take a DataFrame with columns: open, high, low, close, volume
-and return a pandas Series aligned to the input index.
-"""
 import numpy as np
 import pandas as pd
+import logging
 
+logger = logging.getLogger(__name__)
 
-def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    high, low, close = df["high"], df["low"], df["close"]
-    prev_close = close.shift(1)
-    tr = pd.concat([
-        high - low,
-        (high - prev_close).abs(),
-        (low - prev_close).abs(),
-    ], axis=1).max(axis=1)
-    return tr.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+def atr(candles, period=14):
+    """Average True Range from list of candles."""
+    try:
+        if len(candles) < period + 1:
+            return 0
+        df = pd.DataFrame(candles, columns=['timestamp','open','high','low','close','volume'])
+        high = df['high'].values
+        low = df['low'].values
+        close = df['close'].values
+        
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.max([tr1, tr2, tr3], axis=0)
+        
+        atr_val = np.mean(tr[-period:])
+        return atr_val
+    except Exception as e:
+        logger.debug(f"ATR error: {e}")
+        return 0
 
+def adx(df, period=14):
+    """ADX value from DataFrame."""
+    try:
+        if len(df) < period + 1:
+            return 0
+        
+        high = df['high'].values
+        low = df['low'].values
+        close = df['close'].values
+        
+        plus_dm = np.zeros_like(high)
+        minus_dm = np.zeros_like(low)
+        
+        for i in range(1, len(high)):
+            up = high[i] - high[i-1]
+            down = low[i-1] - low[i]
+            
+            if up > down and up > 0:
+                plus_dm[i] = up
+            if down > up and down > 0:
+                minus_dm[i] = down
+        
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.max([tr1, tr2, tr3], axis=0)
+        
+        atr_val = np.mean(tr[-period:])
+        if atr_val == 0:
+            return 0
+        
+        plus_di = 100 * np.mean(plus_dm[-period:]) / atr_val
+        minus_di = 100 * np.mean(minus_dm[-period:]) / atr_val
+        
+        di_sum = plus_di + minus_di
+        if di_sum == 0:
+            return 0
+        
+        dx = 100 * np.abs(plus_di - minus_di) / di_sum
+        adx_val = np.mean(np.tile(dx, (period,)))
+        
+        return adx_val
+    except Exception as e:
+        logger.debug(f"ADX error: {e}")
+        return 0
 
-def adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
-    high, low, close = df["high"], df["low"], df["close"]
+def rsi(df, period=14):
+    """RSI value from DataFrame."""
+    try:
+        if len(df) < period + 1:
+            return 50
+        close = df['close'].values
+        delta = np.diff(close)
+        
+        gain = np.zeros_like(delta)
+        loss = np.zeros_like(delta)
+        
+        gain[delta > 0] = delta[delta > 0]
+        loss[delta < 0] = -delta[delta < 0]
+        
+        avg_gain = np.mean(gain[-period:])
+        avg_loss = np.mean(loss[-period:])
+        
+        if avg_loss == 0:
+            return 100 if avg_gain > 0 else 50
+        
+        rs = avg_gain / avg_loss
+        rsi_val = 100 - (100 / (1 + rs))
+        return rsi_val
+    except Exception as e:
+        logger.debug(f"RSI error: {e}")
+        return 50
 
-    up_move = high.diff()
-    down_move = -low.diff()
-
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-
-    tr_atr = atr(df, period)
-
-    plus_di = 100 * pd.Series(plus_dm, index=df.index).ewm(
-        alpha=1 / period, adjust=False, min_periods=period
-    ).mean() / tr_atr
-    minus_di = 100 * pd.Series(minus_dm, index=df.index).ewm(
-        alpha=1 / period, adjust=False, min_periods=period
-    ).mean() / tr_atr
-
-    dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)) * 100
-    return dx.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-
-
-def rsi(df: pd.DataFrame, period: int = 14, column: str = "close") -> pd.Series:
-    delta = df[column].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-    avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
-
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
-
-
-def bollinger_bands(df: pd.DataFrame, period: int = 20, std_mult: float = 2.0,
-                     column: str = "close") -> pd.DataFrame:
-    mid = df[column].rolling(period).mean()
-    std = df[column].rolling(period).std()
-    return pd.DataFrame({
-        "bb_mid": mid,
-        "bb_upper": mid + std_mult * std,
-        "bb_lower": mid - std_mult * std,
-    }, index=df.index)
-
-
-def rolling_high(df: pd.DataFrame, period: int, column: str = "high") -> pd.Series:
-    # shift(1) so "highest high of last N candles" excludes the current candle
-    return df[column].rolling(period).max().shift(1)
-
-
-def rolling_low(df: pd.DataFrame, period: int, column: str = "low") -> pd.Series:
-    return df[column].rolling(period).min().shift(1)
+def bb(df, period=20, std=2):
+    """Bollinger Bands: returns (upper, middle, lower) for latest."""
+    try:
+        if len(df) < period:
+            return None
+        close = df['close'].values
+        sma = np.mean(close[-period:])
+        stddev = np.std(close[-period:])
+        upper = sma + std * stddev
+        lower = sma - std * stddev
+        return upper, sma, lower
+    except Exception as e:
+        logger.debug(f"BB error: {e}")
+        return None
