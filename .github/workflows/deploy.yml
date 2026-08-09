@@ -33,6 +33,8 @@ jobs:
           username: ubuntu
           key: ${{ secrets.ORACLE_SSH_KEY }}
           port: 22
+          timeout: 20m
+          command_timeout: 20m
           script: |
             set -e
             echo "🚀 Starting deployment..."
@@ -48,6 +50,9 @@ jobs:
             else
               echo "✅ Docker already installed"
             fi
+            
+            # Enable Docker BuildKit for faster builds and better caching
+            export DOCKER_BUILDKIT=1
             
             # Activate docker group for current session
             newgrp docker << 'DOCKER_COMMANDS'
@@ -71,7 +76,7 @@ jobs:
               ln -sf ../bitstamp/data/csv/bitstamp_btcusd_1min_data.csv data/btcusd_bitstamp_1min_latest.csv
               echo "✅ Symlink created successfully"
             else
-              echo "⚠️  Bitstamp CSV not found, system will use downloaded data"
+              echo "⚠️  Bitstamp CSV not found, system will download data"
             fi
             
             # Create .env file
@@ -87,22 +92,23 @@ jobs:
             # Stop old containers
             docker-compose down || true
             
-            # Clean up old images
-            docker image prune -f || true
+            # Remove dangling images to free space
+            docker image prune -f -a --filter "until=24h" || true
             
-            # Build and start
-            echo "🔨 Building and starting containers..."
+            # Build and start (with BuildKit enabled)
+            echo "🔨 Building and starting containers with BuildKit..."
+            export DOCKER_BUILDKIT=1
             docker-compose up -d --build
             
             # Wait for startup
-            sleep 10
+            sleep 15
             
             # Check status
             echo "📊 Container status:"
             docker-compose ps
             
             echo "📋 Recent logs:"
-            docker-compose logs app | head -50
+            docker-compose logs app | tail -100
             
             echo "✅ Deployment complete!"
             
