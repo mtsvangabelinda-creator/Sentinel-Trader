@@ -34,22 +34,25 @@ jobs:
               sudo systemctl restart docker
             fi
             
-            export DOCKER_BUILDKIT=1
-            
             newgrp docker << 'DOCKER_COMMANDS'
             
             cd ~/SentinelTrader || (mkdir -p ~/SentinelTrader && cd ~/SentinelTrader && git clone https://github.com/${{ github.repository }}.git .)
             
             git pull origin main || true
             
-            if [ -f "data/btcusd_bitstamp_1min_latest.csv.gz" ]; then
+            # Extract CSV from correct filename
+            if [ -f "data/btcusd_bitstamp_1min_clean_2024_2026.csv.gz" ]; then
               echo "📥 Extracting CSV..."
               cd data
-              gunzip -c btcusd_bitstamp_1min_latest.csv.gz > btcusd_bitstamp_1min_latest.csv
+              gunzip -c btcusd_bitstamp_1min_clean_2024_2026.csv.gz > btcusd_bitstamp_1min_latest.csv
+              echo "✅ CSV extracted successfully"
               cd ..
-              echo "✅ CSV extracted"
+            else
+              echo "❌ CSV file not found: data/btcusd_bitstamp_1min_clean_2024_2026.csv.gz"
+              exit 1
             fi
             
+            # Create .env file
             cat > .env << 'ENVEOF'
             KRAKEN_API_KEY=${{ secrets.KRAKEN_API_KEY }}
             KRAKEN_SECRET=${{ secrets.KRAKEN_SECRET }}
@@ -58,18 +61,23 @@ jobs:
             ENVEOF
             chmod 600 .env
             
+            # Stop old containers
             docker-compose down || true
+            
+            # Clean up
             docker image prune -f -a --filter "until=24h" || true
             
-            echo "🔨 Building and starting..."
-            export DOCKER_BUILDKIT=1
+            # Build and start (without BuildKit to avoid errors)
+            echo "🔨 Building and starting containers..."
             docker-compose up -d --build
             
             sleep 15
             
-            echo "📊 Status:"
+            echo "📊 Container status:"
             docker-compose ps
-            docker-compose logs app | tail -50
+            
+            echo "📋 Application logs:"
+            docker-compose logs app | tail -100
             
             echo "✅ Deployment complete!"
             
