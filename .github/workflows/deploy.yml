@@ -40,15 +40,18 @@ jobs:
             
             git pull origin main || true
             
-            # Extract CSV from correct filename
-            if [ -f "data/btcusd_bitstamp_1min_clean_2024_2026.csv.gz" ]; then
+            # Create data directory
+            mkdir -p data
+            
+            # Extract CSV from root directory (where it was uploaded)
+            if [ -f "btcusd_bitstamp_1min_clean_2024_2026.csv.gz" ]; then
               echo "📥 Extracting CSV..."
-              cd data
-              gunzip -c btcusd_bitstamp_1min_clean_2024_2026.csv.gz > btcusd_bitstamp_1min_latest.csv
+              gunzip -c btcusd_bitstamp_1min_clean_2024_2026.csv.gz > data/btcusd_bitstamp_1min_latest.csv
               echo "✅ CSV extracted successfully"
-              cd ..
             else
-              echo "❌ CSV file not found: data/btcusd_bitstamp_1min_clean_2024_2026.csv.gz"
+              echo "❌ CSV file not found: btcusd_bitstamp_1min_clean_2024_2026.csv.gz"
+              echo "Available files:"
+              ls -la *.gz 2>/dev/null || echo "No .gz files found"
               exit 1
             fi
             
@@ -67,7 +70,7 @@ jobs:
             # Clean up
             docker image prune -f -a --filter "until=24h" || true
             
-            # Build and start (without BuildKit to avoid errors)
+            # Build and start
             echo "🔨 Building and starting containers..."
             docker-compose up -d --build
             
