@@ -55,8 +55,8 @@ jobs:
             # Clean up
             docker image prune -f -a --filter "until=24h" || true
             
-            # Build and start (no CSV extraction needed!)
-            echo "🔨 Building and starting containers..."
+            # Build and start (no CSV extraction - using Kraken API!)
+            echo "🔨 Building and starting containers with Kraken API data fetcher..."
             docker-compose up -d --build
             
             sleep 15
