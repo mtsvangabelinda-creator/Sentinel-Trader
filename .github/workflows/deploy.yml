@@ -34,19 +34,19 @@ jobs:
               sudo systemctl restart docker
             fi
             
-            newgrp docker << 'DOCKER_COMMANDS'
-            
             cd ~/SentinelTrader || (mkdir -p ~/SentinelTrader && cd ~/SentinelTrader && git clone https://github.com/${{ github.repository }}.git .)
             
             git pull origin main || true
             
-            # Create data directory
+            # Create data directory with proper permissions
             mkdir -p data
+            chmod 755 data
             
             # Extract CSV from root directory with correct filename
             if [ -f "btcusd_bitstamp_1min_clean_2024_2026.csv.gz" ]; then
               echo "📥 Extracting CSV..."
               gunzip -c btcusd_bitstamp_1min_clean_2024_2026.csv.gz > data/btc_usd_1m.csv
+              chmod 644 data/btc_usd_1m.csv
               echo "✅ CSV extracted successfully to data/btc_usd_1m.csv"
             else
               echo "❌ CSV file not found: btcusd_bitstamp_1min_clean_2024_2026.csv.gz"
@@ -72,6 +72,9 @@ jobs:
             TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
             ENVEOF
             chmod 600 .env
+            
+            # Add ubuntu to docker group and refresh
+            newgrp docker << 'DOCKER_COMMANDS'
             
             # Stop old containers
             docker-compose down || true
