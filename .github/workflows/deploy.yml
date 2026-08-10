@@ -38,30 +38,6 @@ jobs:
             
             git pull origin main || true
             
-            # Create data directory
-            mkdir -p data
-            
-            # Extract CSV from root directory with correct filename
-            if [ -f "btcusd_bitstamp_1min_clean_2024_2026.csv.gz" ]; then
-              echo "📥 Extracting CSV..."
-              gunzip -c btcusd_bitstamp_1min_clean_2024_2026.csv.gz > data/btc_usd_1m.csv
-              echo "✅ CSV extracted successfully to data/btc_usd_1m.csv"
-            else
-              echo "❌ CSV file not found: btcusd_bitstamp_1min_clean_2024_2026.csv.gz"
-              echo "Available files:"
-              ls -la *.gz 2>/dev/null || echo "No .gz files found"
-              exit 1
-            fi
-            
-            # Verify CSV exists
-            if [ -f "data/btc_usd_1m.csv" ]; then
-              echo "✅ CSV file verified at data/btc_usd_1m.csv"
-              echo "CSV size: $(du -h data/btc_usd_1m.csv | cut -f1)"
-            else
-              echo "❌ CSV extraction failed"
-              exit 1
-            fi
-            
             # Create .env file
             cat > .env << 'ENVEOF'
             KRAKEN_API_KEY=${{ secrets.KRAKEN_API_KEY }}
@@ -71,16 +47,15 @@ jobs:
             ENVEOF
             chmod 600 .env
             
-            # Add ubuntu to docker group and refresh
             newgrp docker << 'DOCKER_COMMANDS'
             
             # Stop old containers
             docker-compose down || true
             
-            # Clean up old images
+            # Clean up
             docker image prune -f -a --filter "until=24h" || true
             
-            # Build and start containers
+            # Build and start (no CSV extraction needed!)
             echo "🔨 Building and starting containers..."
             docker-compose up -d --build
             
