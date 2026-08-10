@@ -38,15 +38,13 @@ jobs:
             
             git pull origin main || true
             
-            # Create data directory with proper permissions
+            # Create data directory
             mkdir -p data
-            chmod 755 data
             
             # Extract CSV from root directory with correct filename
             if [ -f "btcusd_bitstamp_1min_clean_2024_2026.csv.gz" ]; then
               echo "📥 Extracting CSV..."
               gunzip -c btcusd_bitstamp_1min_clean_2024_2026.csv.gz > data/btc_usd_1m.csv
-              chmod 644 data/btc_usd_1m.csv
               echo "✅ CSV extracted successfully to data/btc_usd_1m.csv"
             else
               echo "❌ CSV file not found: btcusd_bitstamp_1min_clean_2024_2026.csv.gz"
