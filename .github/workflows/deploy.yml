@@ -1,4 +1,19 @@
-- name: Deploy to Oracle Cloud VM
+name: Deploy SentinelTrader to Oracle Cloud
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Deploy to Oracle Cloud VM
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.ORACLE_HOST }}
@@ -11,7 +26,6 @@
             set -e
             echo "🚀 Starting deployment..."
             
-            # Install Docker if needed
             if ! command -v docker &> /dev/null; then
               echo "📦 Installing Docker..."
               sudo apt-get update
@@ -28,19 +42,10 @@
             
             git pull origin main || true
             
-            # Combine CSV parts if they exist
-            echo "📥 Checking for CSV parts..."
-            if ls data/btcusd_bitstamp_1min_latest.csv.part* 1> /dev/null 2>&1; then
-              echo "Combining CSV parts..."
+            if [ -f "data/btcusd_bitstamp_1min_latest.csv.gz" ]; then
+              echo "📥 Extracting CSV..."
               cd data
-              cat btcusd_bitstamp_1min_latest.csv.part* > btcusd_bitstamp_1min_latest.csv
-              rm btcusd_bitstamp_1min_latest.csv.part*
-              cd ..
-              echo "✅ CSV combined successfully"
-            elif [ -f "data/btcusd_bitstamp_1min_latest.csv.zip" ]; then
-              echo "Extracting CSV..."
-              cd data
-              unzip -o btcusd_bitstamp_1min_latest.csv.zip
+              gunzip -c btcusd_bitstamp_1min_latest.csv.gz > btcusd_bitstamp_1min_latest.csv
               cd ..
               echo "✅ CSV extracted"
             fi
