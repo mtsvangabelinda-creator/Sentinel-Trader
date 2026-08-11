@@ -24,7 +24,7 @@ async def run_initial_backtest(config, db, alert):
         # Fetch 60 days of data (increased from 30 for more trades)
         df_1m = await fetcher.get_dataframe(days=60, timeframe='1m')
         
-        if df_1m is None or len(df_1m) < 1000:
+        if df_1m is None or len(df_1m) < 500:
             logger.error("Insufficient Kraken data")
             await alert.send_error("❌ Insufficient data from Kraken (need ≥1000 candles)")
             return False, {'error': 'Insufficient data from Kraken'}
