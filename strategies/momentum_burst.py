@@ -1,72 +1,94 @@
 import logging
-import pandas as pd
-from .base import Signal
-from engine.indicators import adx, atr
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
+
 class MomentumBurst:
+    """Momentum Burst Strategy - Trades consolidation breakouts."""
+    
     def __init__(self, config):
-        self.config = config['strategies']['momentum_burst']
-        self.pool = config['strategy_pools']['momentum']
-
+        self.config = config
+        self.name = 'momentum_burst'
+        self.consolidation_bars = 2  # REDUCED from 3 (more frequent)
+        self.roc_period = 5
+        self.roc_threshold = 0.5  # LOOSENED from 1.0 (more triggers)
+    
     def is_active(self, regime):
-        return True  # Always active
-
+        """Always active."""
+        return True
+    
     def evaluate(self, candles_1m, candles_5m, ticker):
-        """ADX>threshold & tight consolidation breakout."""
-        if len(candles_5m) < 25:
+        """
+        Entry: After consolidation (tight range), momentum break
+        Exit: TIGHT ATR stops, quick profits
+        """
+        
+        if len(candles_5m) < self.consolidation_bars + 5:
             return None
         
         try:
-            df = pd.DataFrame(candles_5m, columns=['timestamp','open','high','low','close','volume'])
-            adx_val = adx(df, 14)
+            closes = np.array([c[4] for c in candles_5m])
+            highs = np.array([c[2] for c in candles_5m])
+            lows = np.array([c[3] for c in candles_5m])
             
-            if adx_val < self.config['adx_threshold']:
+            current_price = closes[-1]
+            
+            # Check for consolidation (tight range)
+            recent_range = np.max(highs[-self.consolidation_bars:]) - np.min(lows[-self.consolidation_bars:])
+            avg_range = np.mean([highs[i] - lows[i] for i in range(-self.consolidation_bars-5, -self.consolidation_bars)])
+            
+            is_consolidating = recent_range < (avg_range * 0.7)
+            
+            if not is_consolidating:
                 return None
             
-            # Check last 3 candles for consolidation
-            last_3 = df.tail(3)
-            high_max = last_3['high'].max()
-            low_min = last_3['low'].min()
-            range_3 = high_max - low_min
+            # Calculate ROC (rate of change)
+            roc = ((closes[-1] - closes[-self.roc_period]) / closes[-self.roc_period]) * 100
             
-            atr_val = atr(candles_5m, 14)
-            if atr_val == 0:
-                return None
-            
-            # Consolidation should be tight
-            if range_3 > self.config['consolidation_range'] * atr_val:
-                return None
-            
-            last_close = df['close'].iloc[-1]
-            
-            # Breakout above 3-candle high
-            if last_close > high_max:
-                stop = last_close - self.config['atr_stop_mult'] * atr_val
-                tp = last_close + self.config['atr_tp_mult'] * atr_val
+            # Calculate ATR
+            atr_values = []
+            for i in range(len(candles_5m) - 14, len(candles_5m)):
+                h = candles_5m[i][2]
+                l = candles_5m[i][3]
+                c_prev = candles_5m[i-1][4] if i > 0 else candles_5m[i][4]
                 
-                return Signal(
-                    strategy='momentum',
-                    action='BUY',
-                    entry_price=last_close,
-                    stop_price=stop,
-                    take_profit=tp
-                )
+                tr = max(h - l, abs(h - c_prev), abs(l - c_prev))
+                atr_values.append(tr)
             
-            # Breakout below 3-candle low
-            elif last_close < low_min:
-                stop = last_close + self.config['atr_stop_mult'] * atr_val
-                tp = last_close - self.config['atr_tp_mult'] * atr_val
+            atr = np.mean(atr_values)
+            
+            # Upside momentum
+            if roc > self.roc_threshold:
+                stop_price = current_price - (atr * 0.35)  # TIGHT: 0.35x ATR
+                take_profit = current_price + (atr * 1.2)  # Quick 1.2x ATR
                 
-                return Signal(
-                    strategy='momentum',
-                    action='SELL',
-                    entry_price=last_close,
-                    stop_price=stop,
-                    take_profit=tp
-                )
+                return {
+                    'strategy': self.name,
+                    'action': 'BUY',
+                    'entry_price': current_price,
+                    'stop_price': stop_price,
+                    'take_profit': take_profit,
+                    'confidence': 0.7,
+                    'reason': f'Consolidation breakout (ROC: {roc:.1f}%)'
+                }
+            
+            # Downside momentum
+            elif roc < -self.roc_threshold:
+                stop_price = current_price + (atr * 0.35)  # TIGHT: 0.35x ATR
+                take_profit = current_price - (atr * 1.2)  # Quick 1.2x ATR
+                
+                return {
+                    'strategy': self.name,
+                    'action': 'SELL',
+                    'entry_price': current_price,
+                    'stop_price': stop_price,
+                    'take_profit': take_profit,
+                    'confidence': 0.7,
+                    'reason': f'Consolidation breakout (ROC: {roc:.1f}%)'
+                }
+        
         except Exception as e:
-            logger.debug(f"Momentum eval error: {e}")
+            logger.debug(f"Momentum burst error: {e}")
         
         return None
