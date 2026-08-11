@@ -25,7 +25,7 @@ async def run_initial_backtest(config, db, alert):
         fetcher = KrakenDataFetcher()
         
         # Fetch 60 days of data
-        df_1m = await fetcher.get_dataframe(days=60, timeframe='1m')
+        df_1m = await fetcher.get_dataframe(days=180, timeframe='1m')
         
         if df_1m is None or len(df_1m) < 500:
             logger.error(f"Insufficient Kraken data: got {len(df_1m) if df_1m is not None else 0}")
