@@ -1,64 +1,108 @@
 import logging
-import pandas as pd
-from .base import Signal
-from engine.indicators import rsi, bb, atr
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
+
 class MeanReversion:
+    """Mean Reversion Strategy - Trades RSI extremes with tight stops."""
+    
     def __init__(self, config):
-        self.config = config['strategies']['mean_reversion']
-        self.pool = config['strategy_pools']['meanrev']
-
+        self.config = config
+        self.name = 'mean_reversion'
+        self.rsi_period = 7  # REDUCED from 14 (more sensitive)
+        self.rsi_oversold = 35  # LOOSENED from 30 (more triggers)
+        self.rsi_overbought = 65  # LOOSENED from 70 (more triggers)
+    
     def is_active(self, regime):
-        return regime == 'ranging'
-
+        """Active in ranging/mean-reversion regimes."""
+        return regime in ['ranging', 'trending']
+    
     def evaluate(self, candles_1m, candles_5m, ticker):
-        """1-min RSI(7) oversold/overbought + BB proximity."""
-        if len(candles_1m) < 30:
+        """
+        Entry: RSI extreme (oversold/overbought) on 1m
+        Exit: TIGHT ATR-based stops, quick profits
+        """
+        
+        if len(candles_1m) < self.rsi_period + 5:
             return None
         
         try:
-            df = pd.DataFrame(candles_1m, columns=['timestamp','open','high','low','close','volume'])
-            rsi_val = rsi(df, self.config['rsi_period'])
-            bb_vals = bb(df, self.config['bb_period'], self.config['bb_std'])
+            closes_1m = np.array([c[4] for c in candles_1m])
+            highs_5m = np.array([c[2] for c in candles_5m])
+            lows_5m = np.array([c[3] for c in candles_5m])
             
-            if bb_vals is None:
-                return None
+            current_price = closes_1m[-1]
             
-            upper, middle, lower = bb_vals
-            last_close = df['close'].iloc[-1]
-            atr_val = atr(candles_1m, 14)
+            # Calculate RSI on 1m
+            rsi = self._calculate_rsi(closes_1m, self.rsi_period)
             
-            if atr_val == 0:
-                return None
-
-            # Long: RSI < oversold and close near lower band
-            if rsi_val < self.config['rsi_oversold'] and last_close <= lower * 1.02:
-                stop = last_close - self.config['atr_stop_mult'] * atr_val
-                tp = middle
+            # Calculate ATR from 5m for stops
+            atr_values = []
+            for i in range(len(candles_5m) - 14, len(candles_5m)):
+                h = candles_5m[i][2]
+                l = candles_5m[i][3]
+                c_prev = candles_5m[i-1][4] if i > 0 else candles_5m[i][4]
                 
-                return Signal(
-                    strategy='meanrev',
-                    action='BUY',
-                    entry_price=last_close,
-                    stop_price=stop,
-                    take_profit=tp
-                )
+                tr = max(h - l, abs(h - c_prev), abs(l - c_prev))
+                atr_values.append(tr)
             
-            # Short: RSI > overbought and close near upper band
-            elif rsi_val > self.config['rsi_overbought'] and last_close >= upper * 0.98:
-                stop = last_close + self.config['atr_stop_mult'] * atr_val
-                tp = middle
+            atr = np.mean(atr_values)
+            
+            # Oversold (RSI < 35) → Buy
+            if rsi < self.rsi_oversold:
+                stop_price = current_price - (atr * 0.4)  # TIGHT: 0.4x ATR
+                take_profit = current_price + (atr * 1.0)  # Quick 1x ATR profit
                 
-                return Signal(
-                    strategy='meanrev',
-                    action='SELL',
-                    entry_price=last_close,
-                    stop_price=stop,
-                    take_profit=tp
-                )
+                return {
+                    'strategy': self.name,
+                    'action': 'BUY',
+                    'entry_price': current_price,
+                    'stop_price': stop_price,
+                    'take_profit': take_profit,
+                    'confidence': 0.65,
+                    'reason': f'RSI oversold ({rsi:.0f})'
+                }
+            
+            # Overbought (RSI > 65) → Sell
+            elif rsi > self.rsi_overbought:
+                stop_price = current_price + (atr * 0.4)  # TIGHT: 0.4x ATR
+                take_profit = current_price - (atr * 1.0)  # Quick 1x ATR profit
+                
+                return {
+                    'strategy': self.name,
+                    'action': 'SELL',
+                    'entry_price': current_price,
+                    'stop_price': stop_price,
+                    'take_profit': take_profit,
+                    'confidence': 0.65,
+                    'reason': f'RSI overbought ({rsi:.0f})'
+                }
+        
         except Exception as e:
-            logger.debug(f"MeanRev eval error: {e}")
+            logger.debug(f"Mean reversion error: {e}")
         
         return None
+    
+    def _calculate_rsi(self, prices, period):
+        """Calculate RSI indicator."""
+        deltas = np.diff(prices)
+        seed = deltas[:period+1]
+        up = seed[seed >= 0].sum() / period
+        down = -seed[seed < 0].sum() / period
+        
+        rs = up / down if down != 0 else 0
+        rsi = 100 - (100 / (1 + rs))
+        
+        for d in deltas[period+1:]:
+            if d >= 0:
+                up = (up * (period - 1) + d) / period
+                down = down * (period - 1) / period
+            else:
+                up = up * (period - 1) / period
+                down = (down * (period - 1) + (-d)) / period
+            
+            rs = up / down if down != 0 else 0
+            rsi = 100 - (100 / (1 + rs))
+        
+        return rsi
