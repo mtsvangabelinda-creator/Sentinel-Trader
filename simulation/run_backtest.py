@@ -13,19 +13,20 @@ from engine.kraken_data_fetcher import KrakenDataFetcher
 
 logger = logging.getLogger(__name__)
 
+
 async def run_initial_backtest(config, db, alert):
-    """Run backtest on Kraken API data (last 30 days)."""
+    """Run backtest on Kraken API data (last 60 days)."""
     
     try:
         logger.info("📥 Fetching data from Kraken API...")
         fetcher = KrakenDataFetcher()
         
-        # Fetch 30 days of data
-        df_1m = await fetcher.get_dataframe(days=30, timeframe='1m')
+        # Fetch 60 days of data (increased from 30 for more trades)
+        df_1m = await fetcher.get_dataframe(days=60, timeframe='1m')
         
-        if df_1m is None or len(df_1m) < 500:
+        if df_1m is None or len(df_1m) < 1000:
             logger.error("Insufficient Kraken data")
-            await alert.send_error("❌ Insufficient data from Kraken (need ≥500 candles)")
+            await alert.send_error("❌ Insufficient data from Kraken (need ≥1000 candles)")
             return False, {'error': 'Insufficient data from Kraken'}
         
         logger.info(f"✅ Loaded {len(df_1m)} 1-minute candles")
@@ -57,7 +58,7 @@ async def run_initial_backtest(config, db, alert):
         metrics = compute_metrics(trades)
         logger.info(f"✅ Backtest complete: {metrics}")
         
-        # Gate criteria (less strict than before since we're using real data)
+        # Gate criteria (adjusted for real market data)
         passed = (
             metrics['num_trades'] >= 50 and
             metrics['sharpe'] >= 0.5 and
