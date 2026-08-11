@@ -24,7 +24,7 @@ async def run_initial_backtest(config, db, alert):
         logger.info("📥 Fetching data from Kraken API...")
         fetcher = KrakenDataFetcher()
         
-        # Fetch 60 days of data
+        # Fetch 180 days of data
         df_1m = await fetcher.get_dataframe(days=180, timeframe='1m')
         
         if df_1m is None or len(df_1m) < 500:
