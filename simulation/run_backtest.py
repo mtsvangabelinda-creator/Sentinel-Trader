@@ -15,19 +15,19 @@ logger = logging.getLogger(__name__)
 
 
 async def run_initial_backtest(config, db, alert):
-    """Run backtest on Kraken API data (last 60 days)."""
+    """Run backtest on Kraken API data (last 60 days, realistic limits)."""
     
     try:
         logger.info("📥 Fetching data from Kraken API...")
         fetcher = KrakenDataFetcher()
         
-        # Fetch 60 days of data (increased from 30 for more trades)
+        # Fetch 60 days of data (Kraken API limits mean we'll get ~500-1000 candles realistically)
         df_1m = await fetcher.get_dataframe(days=60, timeframe='1m')
         
         if df_1m is None or len(df_1m) < 500:
-            logger.error("Insufficient Kraken data")
-            await alert.send_error("❌ Insufficient data from Kraken (need ≥1000 candles)")
-            return False, {'error': 'Insufficient data from Kraken'}
+            logger.error(f"Insufficient Kraken data: got {len(df_1m) if df_1m is not None else 0} candles")
+            await alert.send_error(f"❌ Insufficient data from Kraken (got {len(df_1m) if df_1m is not None else 0}, need ≥500)")
+            return False, {'error': f'Insufficient data from Kraken (need ≥500 candles)'}
         
         logger.info(f"✅ Loaded {len(df_1m)} 1-minute candles")
         
@@ -180,7 +180,7 @@ async def _run_backtest_on_data(candles_1m, candles_5m, config):
                     pool = strategy_pools[strat_name]
                     risk = pool * 0.01
                     stop_dist = abs(current_price - signal.stop_price)
-                    if stop_dist > 0 and stop_dist > 10:  # Minimum $10 stop
+                    if stop_dist > 0 and stop_dist > 10:
                         size = risk / stop_dist
                         if size > 0.0001:
                             trade = {
@@ -228,7 +228,7 @@ async def _run_backtest_on_data(candles_1m, candles_5m, config):
     
     # Close remaining positions
     if open_positions and len(candles_1m) > 0:
-        final_price = float(candles_1m[-1][4])  # close price
+        final_price = float(candles_1m[-1][4])
         for pos in open_positions:
             pnl = (final_price - pos['entry_price']) * pos['size'] if pos['side'] == 'buy' else \
                   (pos['entry_price'] - final_price) * pos['size']
