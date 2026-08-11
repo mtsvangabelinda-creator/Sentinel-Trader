@@ -5,11 +5,13 @@ import numpy as np
 from datetime import datetime, timedelta
 from .metrics import compute_metrics
 from .walk_forward_validator import WalkForwardValidator
+from strategies.base import Signal
 from engine.regime import RegimeClassifier
 from engine.sentinel import Sentinel
 from strategies.trend_following import TrendFollowing
 from strategies.mean_reversion import MeanReversion
 from strategies.momentum_burst import MomentumBurst
+from strategies.volatility_breakout import VolatilityBreakout
 from engine.kraken_data_fetcher import KrakenDataFetcher
 
 logger = logging.getLogger(__name__)
@@ -47,7 +49,7 @@ async def run_initial_backtest(config, db, alert):
         candles_1m = df_1m[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
         candles_5m = df_5m[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
         
-        logger.info("Running backtest simulation...")
+        logger.info("Running backtest simulation with 4 strategies...")
         
         # Run backtest
         trades = await _run_backtest_on_data(candles_1m, candles_5m, config)
@@ -111,7 +113,7 @@ async def run_initial_backtest(config, db, alert):
             f"🟢 <b>STAGE 0 & FORWARD TEST PASSED</b>\n\n"
             f"📈 Backtest Sharpe: {full_metrics['sharpe']:.2f}\n"
             f"🧪 Forward Test Sharpe: {fw_metrics['sharpe']:.2f}\n"
-            f"✅ Walk-Forward Validated\n\n"
+            f"✅ Walk-Forward Validated (Professional Standard)\n\n"
             f"Transitioning to Stage 1 (Paper Trading)..."
         )
         
@@ -162,23 +164,25 @@ async def run_forward_test(config, db, alert, days=5):
 
 
 async def _run_backtest_on_data(candles_1m, candles_5m, config):
-    """Simulate trades on historical data."""
+    """Simulate trades on historical data with 4 strategies."""
     trades = []
     open_positions = []
     
     regime_clf = RegimeClassifier(config)
     sentinel = Sentinel(config)
     
+    # 4 strategies
     strategies = {
         'trend': TrendFollowing(config),
         'meanrev': MeanReversion(config),
-        'momentum': MomentumBurst(config)
+        'momentum': MomentumBurst(config),
+        'volatility': VolatilityBreakout(config)
     }
     
     strategy_pools = config['strategy_pools']
     max_concurrent = config['max_concurrent_trades']
     
-    logger.info(f"Backtesting on {len(candles_1m)} 1m bars, {len(candles_5m)} 5m bars")
+    logger.info(f"Backtesting on {len(candles_1m)} 1m bars, {len(candles_5m)} 5m bars with 4 strategies")
     
     for idx_5m in range(len(candles_5m)):
         end_1m_idx = min((idx_5m + 1) * 5, len(candles_1m))
@@ -200,7 +204,7 @@ async def _run_backtest_on_data(candles_1m, candles_5m, config):
         
         current_price = float(df_5m_current['close'].iloc[-1])
         current_time = df_5m_current['timestamp'].iloc[-1]
-        entry_time_idx = end_1m_idx  # Track position in time series
+        entry_time_idx = end_1m_idx
         
         regime = regime_clf.update(candles_5m_list)
         ticker = {'bid': current_price * 0.9999, 'ask': current_price * 1.0001, 'last': current_price}
@@ -211,9 +215,23 @@ async def _run_backtest_on_data(candles_1m, candles_5m, config):
                 if not strat.is_active(regime):
                     continue
                 
-                signal = strat.evaluate(candles_1m_list, candles_5m_list, ticker)
+                signal_dict = strat.evaluate(candles_1m_list, candles_5m_list, ticker)
+                if signal_dict is None:
+                    continue
+                
+                # Convert dict to Signal object
+                signal = Signal(
+                    strategy=signal_dict['strategy'],
+                    action=signal_dict['action'],
+                    entry_price=signal_dict['entry_price'],
+                    stop_price=signal_dict['stop_price'],
+                    take_profit=signal_dict['take_profit'],
+                    confidence=signal_dict.get('confidence', 0.5),
+                    reason=signal_dict.get('reason', '')
+                )
+                
                 if signal and signal.action != 'NONE':
-                    pool = strategy_pools[strat_name]
+                    pool = strategy_pools.get(strat_name, 50)
                     risk = pool * 0.01
                     stop_dist = abs(current_price - signal.stop_price)
                     if stop_dist > 0 and stop_dist > 10:
@@ -272,5 +290,5 @@ async def _run_backtest_on_data(candles_1m, candles_5m, config):
             pos['status'] = 'closed'
             trades.append(pos)
     
-    logger.info(f"Backtest complete: {len(trades)} trades")
+    logger.info(f"Backtest complete: {len(trades)} trades from 4 strategies")
     return trades
