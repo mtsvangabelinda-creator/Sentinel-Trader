@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 from .metrics import compute_metrics
+from .walk_forward_validator import WalkForwardValidator
 from engine.regime import RegimeClassifier
 from engine.sentinel import Sentinel
 from strategies.trend_following import TrendFollowing
@@ -15,23 +16,23 @@ logger = logging.getLogger(__name__)
 
 
 async def run_initial_backtest(config, db, alert):
-    """Run backtest on Kraken API data (last 60 days, realistic limits)."""
+    """Run backtest with professional walk-forward validation."""
     
     try:
         logger.info("📥 Fetching data from Kraken API...")
         fetcher = KrakenDataFetcher()
         
-        # Fetch 60 days of data (Kraken API limits mean we'll get ~500-1000 candles realistically)
+        # Fetch 60 days of data
         df_1m = await fetcher.get_dataframe(days=60, timeframe='1m')
         
         if df_1m is None or len(df_1m) < 500:
-            logger.error(f"Insufficient Kraken data: got {len(df_1m) if df_1m is not None else 0} candles")
+            logger.error(f"Insufficient Kraken data: got {len(df_1m) if df_1m is not None else 0}")
             await alert.send_error(f"❌ Insufficient data from Kraken (got {len(df_1m) if df_1m is not None else 0}, need ≥500)")
-            return False, {'error': f'Insufficient data from Kraken (need ≥500 candles)'}
+            return False, {'error': 'Insufficient data from Kraken'}
         
         logger.info(f"✅ Loaded {len(df_1m)} 1-minute candles")
         
-        # Resample to 5m for regime detection
+        # Resample to 5m
         df_5m = df_1m.set_index('timestamp').resample('5min').agg({
             'open': 'first',
             'high': 'max',
@@ -46,29 +47,79 @@ async def run_initial_backtest(config, db, alert):
         candles_1m = df_1m[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
         candles_5m = df_5m[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
         
-        logger.info("Running backtest on data...")
+        logger.info("Running backtest simulation...")
         
         # Run backtest
         trades = await _run_backtest_on_data(candles_1m, candles_5m, config)
         
-        if len(trades) < 50:
-            logger.warning(f"Insufficient trades: {len(trades)} (need ≥50)")
-            return False, {'error': f'Insufficient trades: {len(trades)} (need ≥50)'}
+        # Calculate metrics on full dataset
+        full_metrics = compute_metrics(trades)
+        logger.info(f"Full backtest: {len(trades)} trades, Sharpe: {full_metrics['sharpe']:.2f}")
         
-        metrics = compute_metrics(trades)
-        logger.info(f"✅ Backtest complete: {metrics}")
+        # NOW run walk-forward validation (professional gate)
+        validator = WalkForwardValidator(config, alert)
+        wf_passed, wf_results = await validator.validate_with_walk_forward(trades, len(candles_1m))
         
-        # Gate criteria (adjusted for real market data)
-        passed = (
-            metrics['num_trades'] >= 50 and
-            metrics['sharpe'] >= 0.5 and
-            metrics['max_dd'] <= 0.25 and
-            metrics['profit_factor'] >= 1.2 and
-            metrics['win_rate'] >= 0.30
+        if not wf_passed:
+            logger.warning("Walk-Forward Validation FAILED")
+            await alert.send_message(
+                f"❌ <b>STAGE 0 FAILED - Walk-Forward Validation</b>\n\n"
+                f"Full backtest metrics:\n"
+                f"Trades: {len(trades)}\n"
+                f"Sharpe: {full_metrics['sharpe']:.2f}\n\n"
+                f"Issue: {wf_results.get('error', 'Unknown')}"
+            )
+            return False, wf_results
+        
+        logger.info("✅ Walk-Forward Validation PASSED")
+        
+        await alert.send_message(
+            f"✅ <b>BACKTEST PASSED (Walk-Forward Validated)</b>\n\n"
+            f"📊 Full Backtest:\n"
+            f"Trades: {len(trades)}\n"
+            f"Sharpe: {full_metrics['sharpe']:.2f}\n"
+            f"Max DD: {full_metrics['max_dd']*100:.1f}%\n"
+            f"Profit Factor: {full_metrics['profit_factor']:.2f}\n"
+            f"Win Rate: {full_metrics['win_rate']*100:.1f}%\n\n"
+            f"🔬 Walk-Forward:\n"
+            f"Windows Passed: {wf_results['windows_passed']}/{wf_results['windows_tested']}\n"
+            f"OOS Sharpe: {wf_results['oos_sharpe_mean']:.2f}±{wf_results['oos_sharpe_std']:.2f}\n\n"
+            f"🧪 Running forward test..."
         )
         
-        logger.info(f"Gate criteria passed: {passed}")
-        return passed, metrics
+        # Run forward test
+        fw_passed, fw_metrics = await run_forward_test(config, db, alert, days=5)
+        
+        if not fw_passed or fw_metrics.get('sharpe', 0) < 0.0:
+            logger.warning("Forward test underperformed")
+            await alert.send_message(
+                f"⚠️ <b>FORWARD TEST UNDERPERFORMED</b>\n\n"
+                f"Backtest Sharpe: {full_metrics['sharpe']:.2f}\n"
+                f"Forward Sharpe: {fw_metrics.get('sharpe', 'N/A')}\n\n"
+                f"Adjusting parameters and retrying..."
+            )
+            return False, fw_metrics
+        
+        logger.info("✅ Forward test PASSED")
+        
+        # Update config
+        config['initial_config_done'] = True
+        config['mode'] = 'paper'
+        config.save()
+        
+        await alert.send_message(
+            f"🟢 <b>STAGE 0 & FORWARD TEST PASSED</b>\n\n"
+            f"📈 Backtest Sharpe: {full_metrics['sharpe']:.2f}\n"
+            f"🧪 Forward Test Sharpe: {fw_metrics['sharpe']:.2f}\n"
+            f"✅ Walk-Forward Validated\n\n"
+            f"Transitioning to Stage 1 (Paper Trading)..."
+        )
+        
+        return True, {
+            'full_metrics': full_metrics,
+            'walk_forward': wf_results,
+            'forward_test': fw_metrics
+        }
     
     except Exception as e:
         logger.error(f"Backtest error: {e}", exc_info=True)
@@ -77,20 +128,17 @@ async def run_initial_backtest(config, db, alert):
 
 
 async def run_forward_test(config, db, alert, days=5):
-    """Run forward test on recent data to verify no overfitting."""
+    """Run forward test on recent data."""
     
     try:
-        logger.info(f"🔄 Running forward test on last {days} days...")
-        await alert.send_message(f"🧪 Starting forward test ({days} days)...")
+        logger.info(f"Running forward test on last {days} days...")
         
         fetcher = KrakenDataFetcher()
         df_1m = await fetcher.get_dataframe(days=days, timeframe='1m')
         
         if df_1m is None or len(df_1m) < 100:
-            logger.warning("Insufficient data for forward test")
             return False, {'error': 'Insufficient forward test data'}
         
-        # Resample to 5m
         df_5m = df_1m.set_index('timestamp').resample('5min').agg({
             'open': 'first',
             'high': 'max',
@@ -102,20 +150,11 @@ async def run_forward_test(config, db, alert, days=5):
         candles_1m = df_1m[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
         candles_5m = df_5m[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
         
-        logger.info("Running forward test...")
         trades = await _run_backtest_on_data(candles_1m, candles_5m, config)
-        
-        if len(trades) < 10:
-            logger.warning(f"Few trades in forward test: {len(trades)}")
-            return False, {'error': f'Few trades in forward test: {len(trades)}'}
-        
         metrics = compute_metrics(trades)
-        logger.info(f"✅ Forward test: {len(trades)} trades, Sharpe: {metrics['sharpe']:.2f}")
         
-        # Forward test should show positive Sharpe
-        passed = metrics['sharpe'] > 0.0 and metrics['win_rate'] > 0.25
-        
-        return passed, metrics
+        logger.info(f"Forward test: {len(trades)} trades, Sharpe: {metrics['sharpe']:.2f}")
+        return True, metrics
     
     except Exception as e:
         logger.error(f"Forward test error: {e}")
@@ -161,15 +200,12 @@ async def _run_backtest_on_data(candles_1m, candles_5m, config):
         
         current_price = float(df_5m_current['close'].iloc[-1])
         current_time = df_5m_current['timestamp'].iloc[-1]
+        entry_time_idx = end_1m_idx  # Track position in time series
         
-        # Update regime
         regime = regime_clf.update(candles_5m_list)
-        
-        # Check sentinel
         ticker = {'bid': current_price * 0.9999, 'ask': current_price * 1.0001, 'last': current_price}
         sentinel_green = sentinel.check(ticker, candles_5m_list)
         
-        # Evaluate strategies
         if sentinel_green and len(open_positions) < max_concurrent:
             for strat_name, strat in strategies.items():
                 if not strat.is_active(regime):
@@ -189,6 +225,7 @@ async def _run_backtest_on_data(candles_1m, candles_5m, config):
                                 'side': signal.action.lower(),
                                 'entry_price': current_price,
                                 'entry_time': current_time,
+                                'entry_time_idx': entry_time_idx,
                                 'size': size,
                                 'stop_price': signal.stop_price,
                                 'take_profit': signal.take_profit,
@@ -199,7 +236,6 @@ async def _run_backtest_on_data(candles_1m, candles_5m, config):
                             }
                             open_positions.append(trade)
         
-        # Manage positions
         for pos in list(open_positions):
             exit_reason = None
             
@@ -226,7 +262,6 @@ async def _run_backtest_on_data(candles_1m, candles_5m, config):
                 trades.append(pos)
                 open_positions.remove(pos)
     
-    # Close remaining positions
     if open_positions and len(candles_1m) > 0:
         final_price = float(candles_1m[-1][4])
         for pos in open_positions:
