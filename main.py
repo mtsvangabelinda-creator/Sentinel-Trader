@@ -22,6 +22,11 @@ from config.settings import load_config
 from monitoring.sqlite_logger import SQLiteLogger
 from monitoring.telegram_alerts import TelegramAlert
 from simulation.run_backtest import run_initial_backtest, run_forward_test
+from engine.kraken_data_fetcher import KrakenDataFetcher
+from strategies.trend_following import TrendFollowing
+from strategies.mean_reversion import MeanReversion
+from strategies.momentum_burst import MomentumBurst
+from strategies.volatility_breakout import VolatilityBreakout
 
 
 class SentinelTrader:
@@ -140,8 +145,9 @@ class SentinelTrader:
         
         await self.alert.send_message(
             "🔄 <b>STARTING STAGE 0 BACKTEST</b>\n\n"
-            "Fetching 30 days of data from Kraken...\n"
-            "⏳ This may take 3-5 minutes..."
+            "Fetching 60 days of data from Kraken...\n"
+            "⏳ This may take 3-5 minutes...\n"
+            "Testing with 4 strategies (Trend, MeanRev, Momentum, Volatility)"
         )
         
         try:
@@ -159,14 +165,16 @@ class SentinelTrader:
             logger.info("✅ Initial backtest PASSED")
             
             await self.alert.send_message(
-                f"✅ <b>INITIAL BACKTEST PASSED</b>\n\n"
+                f"✅ <b>BACKTEST PASSED (Professional Walk-Forward Validated)</b>\n\n"
                 f"📊 Metrics:\n"
-                f"Sharpe: {metrics['sharpe']:.2f}\n"
-                f"Max DD: {metrics['max_dd']*100:.1f}%\n"
-                f"Profit Factor: {metrics['profit_factor']:.2f}\n"
-                f"Win Rate: {metrics['win_rate']*100:.1f}%\n"
-                f"Trades: {metrics['num_trades']}\n\n"
-                f"🧪 Running forward test (5 days)..."
+                f"Trades: {metrics['full_metrics']['num_trades']}\n"
+                f"Sharpe: {metrics['full_metrics']['sharpe']:.2f}\n"
+                f"Max DD: {metrics['full_metrics']['max_dd']*100:.1f}%\n"
+                f"Profit Factor: {metrics['full_metrics']['profit_factor']:.2f}\n\n"
+                f"🔬 Walk-Forward Analysis:\n"
+                f"Windows Passed: {metrics['walk_forward']['windows_passed']}/{metrics['walk_forward']['windows_tested']}\n"
+                f"OOS Sharpe: {metrics['walk_forward']['oos_sharpe_mean']:.2f}±{metrics['walk_forward']['oos_sharpe_std']:.2f}\n\n"
+                f"🧪 Running forward test..."
             )
             
             # Run forward test
@@ -176,13 +184,13 @@ class SentinelTrader:
                 logger.warning("Forward test underperformed")
                 await self.alert.send_message(
                     f"⚠️ <b>FORWARD TEST UNDERPERFORMED</b>\n\n"
-                    f"Backtest Sharpe: {metrics['sharpe']:.2f}\n"
+                    f"Backtest Sharpe: {metrics['full_metrics']['sharpe']:.2f}\n"
                     f"Forward Sharpe: {fw_metrics.get('sharpe', 'N/A')}\n\n"
                     f"Adjusting parameters and retrying..."
                 )
                 return
             
-            logger.info("✅ Forward test PASSED - Advancing to Stage 1")
+            logger.info("✅ Forward test PASSED")
             
             # Update config
             self.config['initial_config_done'] = True
@@ -192,9 +200,10 @@ class SentinelTrader:
             
             await self.alert.send_message(
                 f"🟢 <b>STAGE 0 & FORWARD TEST PASSED</b>\n\n"
-                f"📈 Backtest Sharpe: {metrics['sharpe']:.2f}\n"
-                f"🧪 Forward Test Sharpe: {fw_metrics['sharpe']:.2f}\n\n"
-                f"✅ Transitioning to Stage 1 (Paper Trading)..."
+                f"📈 Backtest Sharpe: {metrics['full_metrics']['sharpe']:.2f}\n"
+                f"🧪 Forward Test Sharpe: {fw_metrics['sharpe']:.2f}\n"
+                f"✅ Walk-Forward Validated (Professional Standard)\n\n"
+                f"Transitioning to Stage 1 (Paper Trading)..."
             )
         
         except Exception as e:
@@ -206,6 +215,7 @@ class SentinelTrader:
         msg = f"🟢 <b>SYSTEM STATUS</b>\n\n"
         msg += f"Mode: {self.mode.upper()}\n"
         msg += f"Status: RUNNING ✅\n"
+        msg += f"Strategies: Trend, MeanRev, Momentum, Volatility (4 active)\n"
         msg += f"Timestamp: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
         await self.alert.send_message(msg)
     
