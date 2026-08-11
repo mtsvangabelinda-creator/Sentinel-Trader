@@ -1,98 +1,121 @@
+import logging
 import os
-import yaml
-from pathlib import Path
 from dotenv import load_dotenv
+import yaml
+
+logger = logging.getLogger(__name__)
+load_dotenv()
+
 
 class Config(dict):
-    def __init__(self, path):
-        self.path = Path(path)
-        super().__init__()
-        self.load()
-
-    def load(self):
-        if self.path.exists():
-            with open(self.path, 'r') as f:
-                data = yaml.safe_load(f) or {}
-                self.update(data)
-        else:
-            self.update(DEFAULT_CONFIG)
-            self.save()
-
+    """Configuration dictionary with load/save capabilities."""
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.config_file = 'config/btc_config.yaml'
+    
     def save(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, 'w') as f:
-            yaml.dump(dict(self), f, default_flow_style=False, sort_keys=False)
+        """Save config to YAML file."""
+        try:
+            with open(self.config_file, 'w') as f:
+                yaml.dump(dict(self), f)
+            logger.info(f"✅ Config saved to {self.config_file}")
+        except Exception as e:
+            logger.error(f"Error saving config: {e}")
+    
+    def load(self):
+        """Load config from YAML file."""
+        try:
+            with open(self.config_file, 'r') as f:
+                data = yaml.safe_load(f)
+                if data:
+                    self.update(data)
+            logger.info(f"✅ Config loaded from {self.config_file}")
+        except Exception as e:
+            logger.error(f"Error loading config: {e}")
 
+
+# Default configuration
 DEFAULT_CONFIG = {
     'mode': 'backtest',
-    'db_path': 'data/sentinel.db',
-    'data_dir': 'data/',
-    'historical_csv': 'data/btc_usd_1m.csv',
-    'strategy_pools': {'trend': 150, 'meanrev': 150, 'momentum': 50},
+    'initial_config_done': False,
+    
+    # Strategy pools ($)
+    'strategy_pools': {
+        'trend': 100,
+        'meanrev': 100,
+        'momentum': 75,
+        'volatility': 75
+    },
+    
+    # Risk management
     'max_concurrent_trades': 3,
-    'daily_loss_limit': 10.0,
-    'sentinel': {
-        'max_spread_pct': 0.05,
-        'range_multiplier': 3.0
-    },
-    'regime': {
-        'adx_period': 14,
-        'adx_threshold': 25,
-        'persistence': 2
-    },
-    'strategies': {
-        'trend_following': {
-            'breakout_period': 10,
-            'atr_stop_mult': 1.0,
-            'atr_tp_mult': 2.0,
-            'trailing': False
-        },
-        'mean_reversion': {
-            'rsi_period': 7,
-            'rsi_oversold': 30,
-            'rsi_overbought': 70,
-            'bb_period': 20,
-            'bb_std': 2.0,
-            'atr_stop_mult': 1.5
-        },
-        'momentum_burst': {
-            'adx_threshold': 30,
-            'consolidation_range': 0.5,
-            'atr_stop_mult': 0.5,
-            'atr_tp_mult': 1.5
-        }
-    },
-    'optimizer': {
-        'n_trials': 200,
-        'train_split': 0.7,
-        'val_split': 0.15,
-        'test_split': 0.15
-    },
-    'shadow': {
-        'min_trades': 50,
-        'max_days': 7
-    },
-    'promotion': {
-        'prob_threshold': 0.9,
-        'min_profit_factor': 1.3,
-        'max_dd_ratio': 1.0
-    },
-    'rollback': {
-        'monitor_trades': 20,
-        'sharpe_threshold': 0.0,
-        'max_loss_pct': 1.5
-    },
-    'initial_config_done': False
+    'risk_per_trade': 0.01,  # 1% of capital
+    'daily_loss_limit': 10.00,
+    
+    # Backtest parameters
+    'backtest_window_days': 60,
+    'min_trades_required': 100,
+    'sharpe_threshold': 0.5,
+    'max_dd_threshold': 0.25,
+    'profit_factor_threshold': 1.2,
+    'win_rate_threshold': 0.30,
+    
+    # Walk-forward validation (PROFESSIONAL STANDARD)
+    'walk_forward_enabled': True,
+    'walk_forward_train_ratio': 0.70,
+    'walk_forward_test_ratio': 0.30,
+    'walk_forward_num_windows': 5,
+    'walk_forward_oos_gate_multiplier': 0.7,  # OOS must be >= 0.7 * IS Sharpe
+    
+    # Optimizer
+    'optimizer_enabled': True,
+    'optimizer_trials': 200,
+    'optimizer_timeout_seconds': 300,
+    
+    # Regime detection (PROFESSIONAL STANDARD)
+    'regime_detector_enabled': True,
+    'regime_lookback_window': 100,
+    'regime_ks_test_threshold': 0.05,  # p-value threshold
+    
+    # Shadow runner (Stage 2 validator)
+    'shadow_runner_enabled': True,
+    'shadow_runner_days': 7,
+    
+    # Promotion criteria (Stage 1 → Stage 2)
+    'promotion_sharpe_min': 0.8,
+    'promotion_dd_max': 0.15,
+    'promotion_pf_min': 1.3,
+    'promotion_wr_min': 0.35,
+    'promotion_min_trades': 50,
+    
+    # Rollback triggers (Live safety)
+    'rollback_sharpe_min': 0.0,
+    'rollback_loss_percent_max': 1.5,
+    'rollback_trade_lookback': 20,
+    
+    # Logging
+    'log_level': 'INFO',
+    'log_file': 'logs/sentineltrader.log',
+    'sqlite_db': 'data/sentinel.db'
 }
 
-def load_config():
-    return Config('config/btc_config.yaml')
 
 def load_env():
-    load_dotenv()
+    """Load environment variables from .env file."""
     return {
-        'KRAKEN_API_KEY': os.getenv('KRAKEN_API_KEY', ''),
-        'KRAKEN_SECRET': os.getenv('KRAKEN_SECRET', ''),
-        'TELEGRAM_TOKEN': os.getenv('TELEGRAM_TOKEN', ''),
-        'TELEGRAM_CHAT_ID': os.getenv('TELEGRAM_CHAT_ID', '')
+        'KRAKEN_API_KEY': os.getenv('KRAKEN_API_KEY'),
+        'KRAKEN_SECRET': os.getenv('KRAKEN_SECRET'),
+        'TELEGRAM_TOKEN': os.getenv('TELEGRAM_TOKEN'),
+        'TELEGRAM_CHAT_ID': os.getenv('TELEGRAM_CHAT_ID')
     }
+
+
+def load_config():
+    """Load configuration from file or use defaults."""
+    config = Config(DEFAULT_CONFIG)
+    
+    # Try to load from file
+    config.load()
+    
+    return config
