@@ -14,7 +14,7 @@ class KrakenDataFetcher:
         self.exchange = ccxt.kraken({'enableRateLimit': True})
         self.symbol = 'BTC/USD'
     
-    async def fetch_historical_ohlcv(self, days=60, timeframe='1m'):
+    async def fetch_historical_ohlcv(self, days=180, timeframe='1m'):
         """Fetch last N days of OHLCV data from Kraken with robust rate limiting."""
         try:
             logger.info(f"📥 Fetching {days} days of {timeframe} candles from Kraken...")
