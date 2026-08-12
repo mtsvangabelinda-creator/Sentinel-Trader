@@ -54,7 +54,7 @@ DEFAULT_CONFIG = {
     'daily_loss_limit': 10.00,
     
     # Backtest parameters
-    'backtest_window_days': 60,
+    'backtest_window_days': 180,
     'min_trades_required': 100,
     'sharpe_threshold': 0.5,
     'max_dd_threshold': 0.25,
