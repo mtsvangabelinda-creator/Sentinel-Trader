@@ -145,7 +145,7 @@ class SentinelTrader:
         
         await self.alert.send_message(
             "🔄 <b>STARTING STAGE 0 BACKTEST</b>\n\n"
-            "Fetching 60 days of data from Kraken...\n"
+            "Fetching 180 days of data from Kraken...\n"
             "⏳ This may take 3-5 minutes...\n"
             "Testing with 4 strategies (Trend, MeanRev, Momentum, Volatility)"
         )
