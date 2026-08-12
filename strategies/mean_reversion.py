@@ -1,108 +1,182 @@
-import logging
+import pandas as pd
 import numpy as np
+from typing import Optional
 
-logger = logging.getLogger(__name__)
+from strategies.base import Signal
 
 
 class MeanReversion:
-    """Mean Reversion Strategy - Trades RSI extremes with tight stops."""
+    """Mean Reversion strategy with multi-timeframe confirmation."""
     
-    def __init__(self, config):
-        self.config = config
-        self.name = 'mean_reversion'
-        self.rsi_period = 7  # REDUCED from 14 (more sensitive)
-        self.rsi_oversold = 35  # LOOSENED from 30 (more triggers)
-        self.rsi_overbought = 65  # LOOSENED from 70 (more triggers)
+    def __init__(self):
+        self.name = "MeanReversion"
+        self.rsi_oversold = 35  # Looser than 30
+        self.rsi_overbought = 65  # Looser than 70
+        self.atr_multiple = 0.4  # Tight stop
+        self.lookback_period = 20
     
-    def is_active(self, regime):
-        """Active in ranging/mean-reversion regimes."""
-        return regime in ['ranging', 'trending']
-    
-    def evaluate(self, candles_1m, candles_5m, ticker):
+    def generate_signal(self, df_1m: pd.DataFrame, df_5m: pd.DataFrame, df_15m: pd.DataFrame, regime: str) -> Optional[Signal]:
         """
-        Entry: RSI extreme (oversold/overbought) on 1m
-        Exit: TIGHT ATR-based stops, quick profits
+        Generate signal with 3-timeframe confirmation:
+        - 1m: RSI extreme detection
+        - 5m: Pullback confirmation
+        - 15m: Trend context (mean reversion works best in ranging markets)
         """
         
-        if len(candles_1m) < self.rsi_period + 5:
+        if len(df_1m) < 30:
             return None
         
-        try:
-            closes_1m = np.array([c[4] for c in candles_1m])
-            highs_5m = np.array([c[2] for c in candles_5m])
-            lows_5m = np.array([c[3] for c in candles_5m])
-            
-            current_price = closes_1m[-1]
-            
-            # Calculate RSI on 1m
-            rsi = self._calculate_rsi(closes_1m, self.rsi_period)
-            
-            # Calculate ATR from 5m for stops
-            atr_values = []
-            for i in range(len(candles_5m) - 14, len(candles_5m)):
-                h = candles_5m[i][2]
-                l = candles_5m[i][3]
-                c_prev = candles_5m[i-1][4] if i > 0 else candles_5m[i][4]
-                
-                tr = max(h - l, abs(h - c_prev), abs(l - c_prev))
-                atr_values.append(tr)
-            
-            atr = np.mean(atr_values)
-            
-            # Oversold (RSI < 35) → Buy
-            if rsi < self.rsi_oversold:
-                stop_price = current_price - (atr * 0.4)  # TIGHT: 0.4x ATR
-                take_profit = current_price + (atr * 1.0)  # Quick 1x ATR profit
-                
-                return {
-                    'strategy': self.name,
-                    'action': 'BUY',
-                    'entry_price': current_price,
-                    'stop_price': stop_price,
-                    'take_profit': take_profit,
-                    'confidence': 0.65,
-                    'reason': f'RSI oversold ({rsi:.0f})'
-                }
-            
-            # Overbought (RSI > 65) → Sell
-            elif rsi > self.rsi_overbought:
-                stop_price = current_price + (atr * 0.4)  # TIGHT: 0.4x ATR
-                take_profit = current_price - (atr * 1.0)  # Quick 1x ATR profit
-                
-                return {
-                    'strategy': self.name,
-                    'action': 'SELL',
-                    'entry_price': current_price,
-                    'stop_price': stop_price,
-                    'take_profit': take_profit,
-                    'confidence': 0.65,
-                    'reason': f'RSI overbought ({rsi:.0f})'
-                }
+        # ===== 1m: Entry Signal (RSI Extremes) =====
+        rsi_1m = self._calculate_rsi(df_1m, period=14)
+        latest_rsi = rsi_1m.iloc[-1]
         
-        except Exception as e:
-            logger.debug(f"Mean reversion error: {e}")
+        # Detect extreme RSI (oversold or overbought)
+        is_oversold = latest_rsi < self.rsi_oversold
+        is_overbought = latest_rsi > self.rsi_overbought
         
-        return None
-    
-    def _calculate_rsi(self, prices, period):
-        """Calculate RSI indicator."""
-        deltas = np.diff(prices)
-        seed = deltas[:period+1]
-        up = seed[seed >= 0].sum() / period
-        down = -seed[seed < 0].sum() / period
+        if is_oversold:
+            action = 'BUY'
+            direction_1m = 'UP'
+            signal_1m = True
+        elif is_overbought:
+            action = 'SELL'
+            direction_1m = 'DOWN'
+            signal_1m = True
+        else:
+            return None
         
-        rs = up / down if down != 0 else 0
-        rsi = 100 - (100 / (1 + rs))
+        # ===== 5m: Confirmation (Momentum divergence) =====
+        # Check if 5m RSI shows divergence (weaker extreme than 1m)
+        rsi_5m = self._calculate_rsi(df_5m, period=14)
+        latest_rsi_5m = rsi_5m.iloc[-1]
+        prev_rsi_5m = rsi_5m.iloc[-2] if len(rsi_5m) > 1 else latest_rsi_5m
         
-        for d in deltas[period+1:]:
-            if d >= 0:
-                up = (up * (period - 1) + d) / period
-                down = down * (period - 1) / period
+        if direction_1m == 'UP':
+            # For oversold (buy signal), we want 5m to be recovering
+            tf_5m_confirmed = latest_rsi_5m > prev_rsi_5m
+        else:
+            # For overbought (sell signal), we want 5m to be declining
+            tf_5m_confirmed = latest_rsi_5m < prev_rsi_5m
+        
+        if not tf_5m_confirmed:
+            return None
+        
+        # ===== 15m: Bias (Market regime) =====
+        # Mean reversion works best in ranging/neutral markets, not in strong trends
+        adx_15m = self._calculate_adx(df_15m, period=14)
+        latest_adx_15m = adx_15m.iloc[-1]
+        
+        # Only trade mean reversion if ADX is low (not trending)
+        if latest_adx_15m > 30:
+            # Market is trending strongly; mean reversion not ideal
+            tf_15m_bias = 'TRENDING'
+            return None
+        else:
+            # Market is ranging/neutral; mean reversion is good
+            sma_20_15m = df_15m['close'].rolling(20).mean().iloc[-1]
+            current_price_15m = df_15m['close'].iloc[-1]
+            
+            if current_price_15m > sma_20_15m:
+                tf_15m_bias = 'ABOVE_MA'
             else:
-                up = up * (period - 1) / period
-                down = (down * (period - 1) + (-d)) / period
-            
-            rs = up / down if down != 0 else 0
-            rsi = 100 - (100 / (1 + rs))
+                tf_15m_bias = 'BELOW_MA'
         
+        # ===== Calculate Entry Details =====
+        current_price = df_1m['close'].iloc[-1]
+        atr = self._calculate_atr(df_1m, period=14)
+        latest_atr = atr.iloc[-1]
+        
+        entry_price = current_price
+        
+        # For mean reversion, the target is to return to moving average
+        sma_20 = df_1m['close'].rolling(20).mean().iloc[-1]
+        
+        if action == 'BUY':
+            stop_loss = entry_price - (latest_atr * self.atr_multiple)
+            # Target: return to 20-SMA or higher
+            take_profit = max(sma_20, entry_price + (latest_atr * 1.2))
+        else:
+            stop_loss = entry_price + (latest_atr * self.atr_multiple)
+            # Target: return to 20-SMA or lower
+            take_profit = min(sma_20, entry_price - (latest_atr * 1.2))
+        
+        risk = abs(stop_loss - entry_price)
+        reward = abs(take_profit - entry_price)
+        risk_reward_ratio = reward / (risk + 1e-8)
+        
+        # ===== Build Signal =====
+        # Confidence based on how extreme the RSI is
+        rsi_extremeness = abs(latest_rsi - 50) / 50.0  # 0 to 1
+        confidence = min(rsi_extremeness * 0.8 + 0.2, 1.0)
+        
+        signal = Signal(
+            action=action,
+            confidence=confidence,
+            tf_1m_signal=signal_1m,
+            tf_5m_confirmed=tf_5m_confirmed,
+            tf_15m_bias=tf_15m_bias,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            risk_reward_ratio=risk_reward_ratio,
+            strategy_name=self.name,
+            reason=f"RSI={latest_rsi:.1f} | ADX15m={latest_adx_15m:.1f} | Target={take_profit:.2f}"
+        )
+        
+        return signal
+    
+    def _calculate_rsi(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """Calculate Relative Strength Index."""
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / (loss + 1e-8)
+        rsi = 100 - (100 / (1 + rs))
         return rsi
+    
+    def _calculate_adx(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """Calculate Average Directional Index."""
+        high = df['high']
+        low = df['low']
+        close = df['close']
+        
+        plus_dm = np.where((high.diff() > low.diff().abs()) & (high.diff() > 0), high.diff(), 0)
+        minus_dm = np.where((low.diff().abs() > high.diff()) & (low.diff() < 0), low.diff().abs(), 0)
+        
+        tr = np.maximum(
+            high.diff().abs(),
+            np.maximum(
+                (high - close.shift()).abs(),
+                (low - close.shift()).abs()
+            )
+        )
+        
+        atr = pd.Series(tr).rolling(period).mean()
+        
+        plus_di = 100 * pd.Series(plus_dm).rolling(period).mean() / (atr + 1e-8)
+        minus_di = 100 * pd.Series(minus_dm).rolling(period).mean() / (atr + 1e-8)
+        
+        di_diff = (plus_di - minus_di).abs()
+        di_sum = plus_di + minus_di
+        
+        adx = 100 * di_diff / (di_sum + 1e-8)
+        adx = pd.Series(adx).rolling(period).mean()
+        
+        return adx
+    
+    def _calculate_atr(self, df: pd.DataFrame, period: int = 14) -> pd.Series:
+        """Calculate Average True Range."""
+        high = df['high']
+        low = df['low']
+        close = df['close']
+        
+        tr = np.maximum(
+            high - low,
+            np.maximum(
+                (high - close.shift()).abs(),
+                (low - close.shift()).abs()
+            )
+        )
+        
+        atr = pd.Series(tr).rolling(period).mean()
+        return atr
