@@ -1,123 +1,149 @@
 import asyncio
 import logging
-import ccxt.async_support as ccxt
-import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
+from typing import Dict, Optional
+import pandas as pd
+import aiohttp
 
 logger = logging.getLogger(__name__)
 
+
 class KrakenDataFetcher:
-    """Fetch OHLCV data from Kraken API with proper rate limiting."""
+    """Fetches multi-timeframe OHLCV data from Kraken API."""
     
-    def __init__(self):
-        self.exchange = ccxt.kraken({'enableRateLimit': True})
-        self.symbol = 'BTC/USD'
+    BASE_URL = "https://api.kraken.com/0/public/OHLC"
+    MAX_CANDLES_PER_REQUEST = 720  # Kraken limit
+    RATE_LIMIT_DELAY = 0.3  # seconds between requests
     
-    async def fetch_historical_ohlcv(self, days=180, timeframe='1m'):
-        """Fetch last N days of OHLCV data from Kraken with robust rate limiting."""
-        try:
-            logger.info(f"📥 Fetching {days} days of {timeframe} candles from Kraken...")
-            
-            since = int((datetime.utcnow() - timedelta(days=days)).timestamp() * 1000)
-            all_ohlcv = []
-            batch_count = 0
-            consecutive_errors = 0
-            
-            while since < int(datetime.utcnow().timestamp() * 1000):
-                try:
-                    logger.debug(f"Fetching batch {batch_count + 1}...")
-                    ohlcv = await self.exchange.fetch_ohlcv(
-                        self.symbol,
-                        timeframe=timeframe,
-                        since=since,
-                        limit=720
-                    )
-                    
-                    if not ohlcv or len(ohlcv) == 0:
-                        logger.info("No more data available from Kraken")
-                        break
-                    
-                    all_ohlcv.extend(ohlcv)
-                    batch_count += 1
-                    consecutive_errors = 0
-                    
-                    # Update since for next batch
-                    since = int(ohlcv[-1][0]) + 60000
-                    
-                    # Better rate limiting - Kraken allows ~15 calls per second
-                    await asyncio.sleep(0.5)
-                    
-                except ccxt.RateLimitExceeded:
-                    consecutive_errors += 1
-                    if consecutive_errors > 3:
-                        logger.warning("Too many rate limit errors, stopping fetch")
-                        break
-                    logger.warning(f"Rate limit hit, backing off... (attempt {consecutive_errors}/3)")
-                    await asyncio.sleep(2)
-                except ccxt.NetworkError as e:
-                    consecutive_errors += 1
-                    if consecutive_errors > 3:
-                        logger.warning("Too many network errors, stopping fetch")
-                        break
-                    logger.warning(f"Network error: {e}, retrying... (attempt {consecutive_errors}/3)")
-                    await asyncio.sleep(2)
-                except Exception as e:
-                    consecutive_errors += 1
-                    if consecutive_errors > 3:
-                        logger.warning("Too many errors, stopping fetch")
-                        break
-                    logger.warning(f"Fetch batch error: {e}, retrying...")
-                    await asyncio.sleep(1)
-            
-            logger.info(f"✅ Fetched {len(all_ohlcv)} candles in {batch_count} batches")
-            
-            if len(all_ohlcv) == 0:
-                logger.error("No OHLCV data retrieved from Kraken")
-                return None
-            
-            return all_ohlcv
+    def __init__(self, pair: str = "XBTUSDT"):
+        self.pair = pair
+        self.session: Optional[aiohttp.ClientSession] = None
+    
+    async def get_dataframe(self, days: int = 180, timeframes: list = None) -> Dict[str, pd.DataFrame]:
+        """
+        Fetch OHLCV data for multiple timeframes.
         
-        except Exception as e:
-            logger.error(f"Kraken fetch error: {e}")
-            return None
-    
-    async def get_dataframe(self, days=60, timeframe='1m'):
-        """Get OHLCV data as DataFrame."""
-        ohlcv = await self.fetch_historical_ohlcv(days=days, timeframe=timeframe)
+        Args:
+            days: Number of days of historical data to fetch
+            timeframes: List of timeframes in minutes (e.g., [1, 5, 15])
+                       Default: [1, 5, 15] for 1m, 5m, 15m
         
-        if ohlcv is None or len(ohlcv) == 0:
-            logger.error("Failed to get OHLCV data")
-            return None
+        Returns:
+            Dict with keys '1m', '5m', '15m' containing DataFrames with OHLCV data
+        """
+        if timeframes is None:
+            timeframes = [1, 5, 15]
+        
+        self.session = aiohttp.ClientSession()
         
         try:
-            df = pd.DataFrame(
-                ohlcv,
-                columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
-            )
+            logger.info(f"🌐 Fetching {days} days for timeframes: {timeframes}")
             
-            # Convert timestamp to datetime
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            dataframes = {}
+            for tf in timeframes:
+                logger.info(f"  ⏱️ Fetching {tf}m data...")
+                df = await self._fetch_timeframe(days, tf)
+                
+                if df is None or len(df) < 500:
+                    logger.error(f"❌ Insufficient {tf}m data: got {len(df) if df is not None else 0} candles")
+                    return None
+                
+                dataframes[f"{tf}m"] = df
+                logger.info(f"  ✅ Loaded {len(df)} {tf}m candles")
+                
+                # Rate limiting between requests
+                await asyncio.sleep(self.RATE_LIMIT_DELAY)
             
-            # Remove duplicates
-            df = df.drop_duplicates(subset=['timestamp'], keep='first')
-            
-            # Sort by timestamp
-            df = df.sort_values('timestamp').reset_index(drop=True)
-            
-            logger.info(f"DataFrame created: {len(df)} rows from {df['timestamp'].min()} to {df['timestamp'].max()}")
-            return df
+            return dataframes
         
-        except Exception as e:
-            logger.error(f"DataFrame creation error: {e}")
-            return None
+        finally:
+            if self.session:
+                await self.session.close()
     
-    async def get_candles_list(self, days=60, timeframe='1m'):
-        """Get candles as list format [[ts, open, high, low, close, volume], ...]"""
-        df = await self.get_dataframe(days=days, timeframe=timeframe)
+    async def _fetch_timeframe(self, days: int, interval: int) -> Optional[pd.DataFrame]:
+        """
+        Fetch OHLCV data for a single timeframe.
         
-        if df is None:
+        Kraken returns max 720 candles per request, so we need multiple requests
+        for longer periods.
+        """
+        all_data = []
+        
+        # Calculate time window
+        end_time = datetime.utcnow()
+        start_time = end_time - timedelta(days=days)
+        
+        # Convert to Unix timestamps
+        current_time = int(end_time.timestamp())
+        target_time = int(start_time.timestamp())
+        
+        # Kraken interval in minutes
+        kraken_interval = interval
+        candles_per_request = self.MAX_CANDLES_PER_REQUEST
+        seconds_per_candle = interval * 60
+        
+        request_count = 0
+        max_requests = 500  # Safety limit
+        
+        while current_time > target_time and request_count < max_requests:
+            try:
+                params = {
+                    'pair': self.pair,
+                    'interval': kraken_interval,
+                    'since': target_time
+                }
+                
+                async with self.session.get(self.BASE_URL, params=params) as response:
+                    if response.status != 200:
+                        logger.error(f"Kraken API error {response.status}")
+                        await asyncio.sleep(1)
+                        continue
+                    
+                    data = await response.json()
+                    
+                    if 'result' not in data or not data['result']:
+                        logger.warning(f"No data returned for {interval}m interval")
+                        break
+                    
+                    # Kraken returns data with pair as key
+                    candles = data['result'].get(self.pair, [])
+                    
+                    if not candles:
+                        break
+                    
+                    all_data.extend(candles)
+                    
+                    # Kraken returns data in ascending order
+                    # Get the timestamp of the last candle and continue from there
+                    last_candle_time = candles[-1][0]
+                    current_time = last_candle_time + seconds_per_candle
+                    
+                    request_count += 1
+                    await asyncio.sleep(self.RATE_LIMIT_DELAY)
+                    
+            except Exception as e:
+                logger.error(f"Error fetching {interval}m data: {e}")
+                await asyncio.sleep(1)
+        
+        if not all_data:
             return None
         
-        candles = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].values.tolist()
-        return candles
+        # Convert to DataFrame
+        df = pd.DataFrame(all_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'vwap', 'volume', 'count'])
+        
+        # Clean data types
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+        df['open'] = pd.to_numeric(df['open'])
+        df['high'] = pd.to_numeric(df['high'])
+        df['low'] = pd.to_numeric(df['low'])
+        df['close'] = pd.to_numeric(df['close'])
+        df['volume'] = pd.to_numeric(df['volume'])
+        
+        # Set index
+        df.set_index('timestamp', inplace=True)
+        df.sort_index(inplace=True)
+        
+        # Remove duplicates
+        df = df[~df.index.duplicated(keep='first')]
+        
+        return df
