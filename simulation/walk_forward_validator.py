@@ -1,191 +1,269 @@
 import logging
-import asyncio
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
-from .metrics import compute_metrics
-from engine.kraken_data_fetcher import KrakenDataFetcher
+from typing import Tuple, Dict, List
+
+from simulation.metrics import compute_metrics
 
 logger = logging.getLogger(__name__)
 
 
 class WalkForwardValidator:
-    """Professional walk-forward validation with dynamic thresholds."""
+    """Professional walk-forward validation across 3 timeframes."""
     
-    def __init__(self, config, alert):
-        self.config = config
-        self.alert = alert
-        self.window_size_percent = 0.7  # 70% training
-        self.oos_percent = 0.30  # 30% out-of-sample
-        self.min_trades_required = 100
-        self.oos_gate_multiplier = 0.7  # OOS must be >= 0.7 * IS Sharpe
+    def __init__(self, train_ratio: float = 0.7, num_windows: int = 5):
+        self.train_ratio = train_ratio
+        self.num_windows = num_windows
     
-    async def validate_with_walk_forward(self, all_trades, total_candles):
+    def validate(self, df_1m, df_5m, df_15m, strategies, regime_classifier, sentinel) -> Tuple[bool, Dict]:
         """
         Run walk-forward validation.
         
-        Splits data into multiple rolling windows:
-        - Window 1: candles 0-70% (train), 70-100% (test)
-        - Window 2: candles 10%-80% (train), 80-110% (test)
-        - etc...
-        
-        Returns: (passed, metrics_dict)
+        Returns:
+            (is_valid, metrics_dict)
         """
         
-        logger.info("🔄 Starting Walk-Forward Validation...")
-        await self.alert.send_message("🔄 Validating with Walk-Forward Analysis...\n(Testing across 70/30 rolling windows)")
+        all_trades = []
+        window_results = []
         
-        try:
-            if not all_trades or len(all_trades) < self.min_trades_required:
-                logger.warning(f"Insufficient trades: {len(all_trades)} (need ≥{self.min_trades_required})")
-                return False, {
-                    'error': f'Insufficient trades: {len(all_trades)} (need ≥{self.min_trades_required})',
-                    'trades_count': len(all_trades),
-                    'requirement': self.min_trades_required
-                }
+        # Split data into rolling windows
+        total_len = len(df_1m)
+        window_size = total_len // self.num_windows
+        train_size = int(window_size * self.train_ratio)
+        
+        for window_idx in range(self.num_windows):
+            start_idx = window_idx * window_size
+            end_idx = start_idx + window_size
             
-            # Calculate dynamic thresholds from data
-            all_sharpes = []
-            all_dd = []
-            all_pf = []
-            all_wr = []
+            train_end_idx = start_idx + train_size
+            test_start_idx = train_end_idx
+            test_end_idx = end_idx
             
-            window_results = []
-            num_windows = 5  # Test on 5 rolling windows
+            # Split data
+            train_1m = df_1m.iloc[start_idx:train_end_idx]
+            train_5m = df_5m.iloc[start_idx:train_end_idx]
+            train_15m = df_15m.iloc[start_idx:train_end_idx]
             
-            # Calculate window size
-            total_minutes = total_candles
-            train_size = int(total_minutes * self.window_size_percent)
-            test_size = int(total_minutes * self.oos_percent)
-            step_size = int(total_minutes * 0.15)  # 15% overlap
+            test_1m = df_1m.iloc[test_start_idx:test_end_idx]
+            test_5m = df_5m.iloc[test_start_idx:test_end_idx]
+            test_15m = df_15m.iloc[test_start_idx:test_end_idx]
             
-            logger.info(f"Running {num_windows} rolling window tests...")
-            logger.info(f"Train window: {train_size} candles, Test window: {test_size} candles")
+            logger.info(f"\n🔄 Window {window_idx + 1}/{self.num_windows}")
+            logger.info(f"   Train: {len(train_1m)} candles | Test: {len(test_1m)} candles")
             
-            for window_idx in range(num_windows):
-                start_idx = window_idx * step_size
-                train_end = start_idx + train_size
-                test_end = train_end + test_size
-                
-                if test_end > total_candles:
-                    break
-                
-                # Split trades into IS (in-sample) and OOS (out-of-sample)
-                is_trades = [t for t in all_trades if t.get('entry_time_idx', 0) < train_end]
-                oos_trades = [t for t in all_trades if train_end <= t.get('entry_time_idx', 0) < test_end]
-                
-                if len(is_trades) < 10 or len(oos_trades) < 5:
-                    continue
-                
-                # Calculate metrics
-                is_metrics = compute_metrics(is_trades)
-                oos_metrics = compute_metrics(oos_trades)
-                
-                # Check OOS gate: OOS Sharpe >= 0.7 * IS Sharpe
-                oos_gate_threshold = is_metrics['sharpe'] * self.oos_gate_multiplier
-                oos_passed = oos_metrics['sharpe'] >= oos_gate_threshold
-                
-                window_result = {
-                    'window': window_idx + 1,
-                    'is_trades': len(is_trades),
-                    'oos_trades': len(oos_trades),
-                    'is_sharpe': is_metrics['sharpe'],
-                    'oos_sharpe': oos_metrics['sharpe'],
-                    'oos_gate_threshold': oos_gate_threshold,
-                    'oos_passed': oos_passed,
-                    'is_dd': is_metrics['max_dd'],
-                    'oos_dd': oos_metrics['max_dd'],
-                    'is_pf': is_metrics['profit_factor'],
-                    'oos_pf': oos_metrics['profit_factor']
-                }
-                
-                window_results.append(window_result)
-                
-                if oos_passed:
-                    all_sharpes.append(oos_metrics['sharpe'])
-                    all_dd.append(oos_metrics['max_dd'])
-                    all_pf.append(oos_metrics['profit_factor'])
-                    all_wr.append(oos_metrics['win_rate'])
-                
-                logger.info(
-                    f"Window {window_idx + 1}: "
-                    f"IS Sharpe={is_metrics['sharpe']:.2f}, "
-                    f"OOS Sharpe={oos_metrics['sharpe']:.2f}, "
-                    f"Gate={'✅ PASS' if oos_passed else '❌ FAIL'}"
-                )
+            # Train: Fit regime classifier
+            regime_classifier.fit(train_1m)
             
-            # Calculate dynamic thresholds from OOS results
-            if not all_sharpes:
-                logger.warning("No windows passed OOS gate")
-                return False, {
-                    'error': 'All windows failed OOS gate (OOS Sharpe < 0.7 × IS Sharpe)',
-                    'window_results': window_results
-                }
-            
-            # Dynamic threshold: mean - 1 std dev (conservative)
-            dynamic_sharpe_threshold = np.mean(all_sharpes) - np.std(all_sharpes)
-            dynamic_dd_threshold = np.mean(all_dd) + np.std(all_dd)  # Higher is worse
-            
-            # Overall validation passed if:
-            passed_windows = sum(1 for w in window_results if w['oos_passed'])
-            pass_rate = passed_windows / len(window_results) if window_results else 0
-            
-            overall_passed = (
-                pass_rate >= 0.6 and  # At least 60% of windows pass
-                len(all_sharpes) >= 3 and  # At least 3 windows passed
-                np.std(all_sharpes) < 1.0  # OOS Sharpes are consistent (not too volatile)
+            # Test: Generate signals on out-of-sample data
+            window_trades = self._generate_signals_oos(
+                test_1m, test_5m, test_15m,
+                strategies, regime_classifier, sentinel
             )
             
-            summary = {
-                'walk_forward_passed': overall_passed,
-                'windows_tested': len(window_results),
-                'windows_passed': passed_windows,
-                'pass_rate': pass_rate,
-                'oos_sharpe_mean': np.mean(all_sharpes) if all_sharpes else 0,
-                'oos_sharpe_std': np.std(all_sharpes) if all_sharpes else 0,
-                'oos_sharpe_min': np.min(all_sharpes) if all_sharpes else 0,
-                'dynamic_sharpe_threshold': dynamic_sharpe_threshold,
-                'total_trades': len(all_trades),
-                'window_results': window_results
-            }
+            all_trades.extend(window_trades)
             
-            await self.alert.send_message(
-                f"📊 <b>Walk-Forward Validation Results</b>\n\n"
-                f"Windows Passed: {passed_windows}/{len(window_results)}\n"
-                f"Pass Rate: {pass_rate*100:.1f}%\n"
-                f"OOS Sharpe (mean±std): {np.mean(all_sharpes):.2f}±{np.std(all_sharpes):.2f}\n"
-                f"Total Trades: {len(all_trades)}\n"
-                f"Status: {'✅ PASSED' if overall_passed else '❌ FAILED'}"
-            )
-            
-            logger.info(f"Walk-Forward Validation: {'✅ PASSED' if overall_passed else '❌ FAILED'}")
-            return overall_passed, summary
+            # Metrics for this window
+            if window_trades:
+                window_pnl = sum([t['pnl'] for t in window_trades])
+                window_wr = sum([1 for t in window_trades if t['pnl'] > 0]) / len(window_trades)
+                logger.info(f"   Trades: {len(window_trades)} | PnL: ${window_pnl:.2f} | WR: {window_wr:.1%}")
+                window_results.append({
+                    'window': window_idx,
+                    'trades': len(window_trades),
+                    'pnl': window_pnl,
+                    'win_rate': window_wr
+                })
+            else:
+                logger.warning(f"   ⚠️ No trades generated in this window")
         
-        except Exception as e:
-            logger.error(f"Walk-forward validation error: {e}", exc_info=True)
-            await self.alert.send_error(f"Walk-forward validation error: {e}")
-            return False, {'error': str(e)}
+        # Compute aggregate metrics
+        metrics = self._compute_aggregate_metrics(all_trades, window_results)
+        
+        # Validation gates
+        is_valid = self._check_validation_gates(metrics, all_trades)
+        
+        return is_valid, metrics
     
-    def calculate_dynamic_thresholds(self, metrics_list):
-        """Calculate data-driven thresholds instead of hardcoded values."""
+    def _generate_signals_oos(self, df_1m, df_5m, df_15m, strategies, regime_classifier, sentinel):
+        """Generate signals on out-of-sample data with multi-timeframe confirmation."""
         
-        if not metrics_list:
+        trades = []
+        position = None
+        
+        # Iterate through 1m candles
+        for idx in range(100, len(df_1m)):  # Start at 100 to allow indicators to warm up
+            time = df_1m.index[idx]
+            price = df_1m['close'].iloc[idx]
+            
+            # Get current candles
+            current_1m = df_1m.iloc[idx]
+            
+            # Find corresponding 5m and 15m candles (they might not be at exact same time)
+            five_m_idx = self._find_closest_index(df_5m.index, time)
+            fifteen_m_idx = self._find_closest_index(df_15m.index, time)
+            
+            if five_m_idx is None or fifteen_m_idx is None:
+                continue
+            
+            current_5m = df_5m.iloc[five_m_idx]
+            current_15m = df_15m.iloc[fifteen_m_idx]
+            
+            # Classify regime on 1m data
+            regime = regime_classifier.classify(df_1m.iloc[:idx+1])
+            
+            # Get signals from all strategies
+            best_signal = None
+            best_confidence = 0
+            
+            for strategy in strategies:
+                signal = strategy.generate_signal(
+                    df_1m=df_1m.iloc[:idx+1],
+                    df_5m=df_5m.iloc[:five_m_idx+1],
+                    df_15m=df_15m.iloc[:fifteen_m_idx+1],
+                    regime=regime
+                )
+                
+                if signal and signal.is_valid() and signal.confidence > best_confidence:
+                    best_signal = signal
+                    best_confidence = signal.confidence
+            
+            # Execute if signal passes Sentinel
+            if best_signal and position is None:
+                if sentinel.should_trade(best_signal, regime):
+                    # Simulate entry
+                    entry_price = price
+                    exit_price = self._simulate_exit(df_1m, idx, best_signal, entry_price)
+                    
+                    pnl = (exit_price - entry_price) if best_signal.action == 'BUY' else (entry_price - exit_price)
+                    
+                    trades.append({
+                        'entry_time': time,
+                        'entry_price': entry_price,
+                        'exit_price': exit_price,
+                        'pnl': pnl,
+                        'strategy': best_signal.strategy_name,
+                        'confidence': best_signal.confidence
+                    })
+                    
+                    position = best_signal
+        
+        return trades
+    
+    def _find_closest_index(self, index_series, target_time):
+        """Find index of closest timestamp in series."""
+        try:
+            if target_time in index_series:
+                return index_series.get_loc(target_time)
+            else:
+                # Find closest
+                pos = index_series.searchsorted(target_time)
+                if pos == 0:
+                    return 0
+                elif pos == len(index_series):
+                    return len(index_series) - 1
+                else:
+                    # Return closest
+                    left = index_series[pos - 1]
+                    right = index_series[pos]
+                    if abs((target_time - left).total_seconds()) < abs((target_time - right).total_seconds()):
+                        return pos - 1
+                    else:
+                        return pos
+        except:
+            return None
+    
+    def _simulate_exit(self, df, entry_idx, signal, entry_price, max_bars=100):
+        """Simulate exit after entry (simple: exit after N bars or on opposite signal)."""
+        
+        for i in range(entry_idx + 1, min(entry_idx + max_bars, len(df))):
+            current_price = df['close'].iloc[i]
+            
+            # Stop loss
+            if signal.stop_loss:
+                if signal.action == 'BUY' and current_price < signal.stop_loss:
+                    return signal.stop_loss
+                elif signal.action == 'SELL' and current_price > signal.stop_loss:
+                    return signal.stop_loss
+            
+            # Take profit
+            if signal.take_profit:
+                if signal.action == 'BUY' and current_price > signal.take_profit:
+                    return signal.take_profit
+                elif signal.action == 'SELL' and current_price < signal.take_profit:
+                    return signal.take_profit
+        
+        # Exit at end of window
+        return df['close'].iloc[-1]
+    
+    def _compute_aggregate_metrics(self, trades, window_results):
+        """Compute overall backtest metrics."""
+        
+        if not trades:
             return {
-                'sharpe_min': 0.5,
-                'dd_max': 0.25,
-                'pf_min': 1.2,
-                'wr_min': 0.30
+                'total_trades': 0,
+                'sharpe_ratio': -999,
+                'win_rate': 0,
+                'max_drawdown': 0,
+                'profit_factor': 0,
+                'fail_reason': 'Insufficient trades: 0 (need ≥100)'
             }
         
-        sharpes = [m['sharpe'] for m in metrics_list]
-        dds = [m['max_dd'] for m in metrics_list]
-        pfs = [m['profit_factor'] for m in metrics_list]
-        wrs = [m['win_rate'] for m in metrics_list]
+        # Calculate PnL
+        pnls = [t['pnl'] for t in trades]
+        total_pnl = sum(pnls)
+        wins = sum(1 for p in pnls if p > 0)
+        win_rate = wins / len(trades)
         
-        # Dynamic thresholds: mean - 1 std dev (conservative, data-driven)
+        # Sharpe ratio
+        returns = np.array(pnls)
+        if len(returns) > 1 and returns.std() > 0:
+            sharpe = (returns.mean() / returns.std()) * np.sqrt(252 * 1440)  # Annualized
+        else:
+            sharpe = -999
+        
+        # Max drawdown
+        cumulative = np.cumsum(pnls)
+        running_max = np.maximum.accumulate(cumulative)
+        drawdown = (cumulative - running_max) / (running_max + 1e-8)
+        max_dd = abs(drawdown.min())
+        
+        # Profit factor
+        wins_sum = sum([p for p in pnls if p > 0])
+        losses_sum = abs(sum([p for p in pnls if p < 0]))
+        profit_factor = wins_sum / (losses_sum + 1e-8) if losses_sum > 0 else 0
+        
         return {
-            'sharpe_min': max(0.3, np.mean(sharpes) - np.std(sharpes)),
-            'dd_max': np.mean(dds) + np.std(dds),
-            'pf_min': max(1.0, np.mean(pfs) - np.std(pfs)),
-            'wr_min': max(0.20, np.mean(wrs) - np.std(wrs))
-              }
+            'total_trades': len(trades),
+            'sharpe_ratio': sharpe,
+            'win_rate': win_rate,
+            'max_drawdown': max_dd,
+            'profit_factor': profit_factor,
+            'total_pnl': total_pnl,
+            'window_results': window_results,
+            'fail_reason': None
+        }
+    
+    def _check_validation_gates(self, metrics, trades):
+        """Check if backtest passes validation criteria."""
+        
+        # Gate 1: Minimum trades
+        if metrics['total_trades'] < 100:
+            metrics['fail_reason'] = f"Insufficient trades: {metrics['total_trades']} (need ≥100)"
+            return False
+        
+        # Gate 2: Positive Sharpe (out-of-sample)
+        if metrics['sharpe_ratio'] < 0:
+            metrics['fail_reason'] = f"Negative Sharpe: {metrics['sharpe_ratio']:.2f} (need ≥0)"
+            return False
+        
+        # Gate 3: Win rate > 45%
+        if metrics['win_rate'] < 0.45:
+            metrics['fail_reason'] = f"Low win rate: {metrics['win_rate']:.1%} (need ≥45%)"
+            return False
+        
+        # Gate 4: Max drawdown < 20%
+        if metrics['max_drawdown'] > 0.20:
+            metrics['fail_reason'] = f"High drawdown: {metrics['max_drawdown']:.1%} (need <20%)"
+            return False
+        
+        return True
