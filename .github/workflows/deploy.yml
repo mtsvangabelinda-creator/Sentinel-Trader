@@ -1,0 +1,47 @@
+name: Deploy SentinelTrader
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Deploy to Oracle
+        env:
+          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
+          ORACLE_USER: ubuntu
+          ORACLE_KEY: ${{ secrets.ORACLE_KEY }}
+          KRAKEN_API_KEY: ${{ secrets.KRAKEN_API_KEY }}
+          KRAKEN_API_SECRET: ${{ secrets.KRAKEN_API_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$ORACLE_KEY" > ~/.ssh/key.pem
+          chmod 600 ~/.ssh/key.pem
+          ssh-keyscan -H $ORACLE_HOST >> ~/.ssh/known_hosts 2>/dev/null
+          
+          ssh -i ~/.ssh/key.pem ubuntu@$ORACLE_HOST << 'DEPLOY'
+          cd /home/ubuntu/sentineltrader || git clone https://github.com/${{ github.repository }}.git sentineltrader && cd sentineltrader
+          git pull
+          
+          cat > .env << 'EOF'
+          KRAKEN_API_KEY=${{ env.KRAKEN_API_KEY }}
+          KRAKEN_API_SECRET=${{ env.KRAKEN_API_SECRET }}
+          TELEGRAM_BOT_TOKEN=${{ env.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID=${{ env.TELEGRAM_CHAT_ID }}
+          DATABASE_URL=postgresql://sentineltrader_user:sentineltrader_password@postgres:5432/sentineltrader_db
+          REDIS_URL=redis://redis:6379
+          ENVIRONMENT=production
+          EOF
+          
+          docker-compose down
+          docker-compose up -d
+          echo "✅ SentinelTrader deployed successfully"
+          DEPLOY
