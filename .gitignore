@@ -1,9 +1,0 @@
-.env
-data/
-dashboard/
-__pycache__/
-*.pyc
-*.db
-*.csv
-config/*.backup
-.DS_Store
