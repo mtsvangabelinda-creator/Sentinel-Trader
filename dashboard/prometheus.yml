@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'sentineltrader-monitor'
+
+scrape_configs:
+  - job_name: 'sentineltrader'
+    static_configs:
+      - targets: ['localhost:8000']
+    scrape_interval: 10s
+    scrape_timeout: 5s
