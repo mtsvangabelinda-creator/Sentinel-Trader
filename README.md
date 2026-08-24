@@ -18,3 +18,12 @@ An autonomous, zero-cost algorithmic trading bot for cryptocurrency markets.
 3. Deploy to Oracle Cloud via GitHub Actions
 
 ## GitHub Secrets Required
+## Architecture
+
+Layer 1: Data Harvester → Layer 2: Whitelist → Layer 3: Regime Detection → Layer 4: Alpha Evolution → Layer 5: Signal Engine → Layer 6: Priority Ranker → Layer 7: Execution → Layer 8: RL Agent → Layer 9: Oversight
+
+## Deploy
+
+GitHub Actions auto-deploys on push to main.
+
+Access Grafana: `http://ORACLE_IP:3000`
