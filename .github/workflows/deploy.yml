@@ -19,21 +19,22 @@ jobs:
           username: ubuntu
           key: ${{ secrets.ORACLE_KEY }}
           envs: KRAKEN_API_KEY,KRAKEN_API_SECRET,TELEGRAM_BOT_TOKEN,TELEGRAM_CHAT_ID
-          env:
-            KRAKEN_API_KEY: ${{ secrets.KRAKEN_API_KEY }}
-            KRAKEN_API_SECRET: ${{ secrets.KRAKEN_API_SECRET }}
-            TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-            TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          env_path: .env.example
           script: |
+            export KRAKEN_API_KEY="${{ secrets.KRAKEN_API_KEY }}"
+            export KRAKEN_API_SECRET="${{ secrets.KRAKEN_API_SECRET }}"
+            export TELEGRAM_BOT_TOKEN="${{ secrets.TELEGRAM_BOT_TOKEN }}"
+            export TELEGRAM_CHAT_ID="${{ secrets.TELEGRAM_CHAT_ID }}"
+            
             cd ~/sentineltrader || git clone https://github.com/${{ github.repository }}.git ~/sentineltrader
             cd ~/sentineltrader
             git pull origin main
             
             cat > .env << EOF
-            KRAKEN_API_KEY=$KRAKEN_API_KEY
-            KRAKEN_API_SECRET=$KRAKEN_API_SECRET
-            TELEGRAM_BOT_TOKEN=$TELEGRAM_BOT_TOKEN
-            TELEGRAM_CHAT_ID=$TELEGRAM_CHAT_ID
+            KRAKEN_API_KEY=${KRAKEN_API_KEY}
+            KRAKEN_API_SECRET=${KRAKEN_API_SECRET}
+            TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+            TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
             DATABASE_URL=postgresql://sentineltrader_user:sentineltrader_password@postgres:5432/sentineltrader_db
             REDIS_URL=redis://redis:6379
             ENVIRONMENT=production
