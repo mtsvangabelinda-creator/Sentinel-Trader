@@ -14,25 +14,21 @@ jobs:
       
       - name: Deploy to Oracle
         env:
-          ORACLE_HOST: ${{ secrets.ORACLE_HOST }}
-          ORACLE_KEY: ${{ secrets.ORACLE_KEY }}
+          HOST: ${{ secrets.ORACLE_HOST }}
+          KEY: ${{ secrets.ORACLE_KEY }}
           KRAKEN_API_KEY: ${{ secrets.KRAKEN_API_KEY }}
           KRAKEN_API_SECRET: ${{ secrets.KRAKEN_API_SECRET }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           mkdir -p ~/.ssh
-          echo "$ORACLE_KEY" > ~/.ssh/oracle_key
-          chmod 600 ~/.ssh/oracle_key
-          
-          ssh-keyscan -H $ORACLE_HOST >> ~/.ssh/known_hosts 2>/dev/null || true
-          
-          ssh -i ~/.ssh/oracle_key -o "StrictHostKeyChecking=no" ubuntu@$ORACLE_HOST bash << 'ENDSSH'
-          set -e
+          echo "$KEY" > ~/.ssh/key.pem
+          chmod 600 ~/.ssh/key.pem
+          ssh-keyscan -H $HOST >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh -i ~/.ssh/key.pem -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ubuntu@$HOST bash << 'DEPLOY'
           cd ~/sentineltrader || git clone https://github.com/${{ github.repository }}.git ~/sentineltrader
           cd ~/sentineltrader
           git pull origin main
-          
           cat > .env << EOF
           KRAKEN_API_KEY=$KRAKEN_API_KEY
           KRAKEN_API_SECRET=$KRAKEN_API_SECRET
@@ -42,8 +38,7 @@ jobs:
           REDIS_URL=redis://redis:6379
           ENVIRONMENT=production
           EOF
-          
           docker-compose down || true
           docker-compose up -d
           echo "✅ Deployment successful"
-          ENDSSH
+          DEPLOY
